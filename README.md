@@ -10,6 +10,13 @@ Danny Cole came to Neon Bay to drive getaway cars and keep his head down. The ci
 
 Everything is original: the city, the cars, the characters, the music. No part of any commercial game. The game runs entirely offline in desktop Chrome from static files — no network requests, no build step, no downloads.
 
+## v2 notes
+
+- **Pursuit tuning** — patrol cars close in faster and hold line of sight longer on open roads, so the heat stays hot.
+- **Siren attenuation** — the two-tone siren now fades with distance from the nearest patrol car.
+- **Rival car** — Payback's rival drives a dedicated magenta car, so the target is unmistakable.
+- **Foot officers** — on-foot police officers join the chase from 1 star up and can arrest Danny if they hold him.
+
 ## Features
 
 - **Procedural 3D city** — a seeded coastal grid of streets, towers, parks, palms, a beach and a marina, the same city every run
