@@ -246,8 +246,9 @@ export class AudioEngine {
     this._phrase([392.0, 349.23, 311.13, 261.63], 0.17, 'triangle', 0.24, 0.5);
   }
 
-  // A heavy low thud for impacts. No collision hook calls it yet — the
-  // integration phase wires it to car and wall hits.
+  // A heavy low thud for impacts. The game loop plays it when the
+  // player's car takes a hard wall hit, and the police and pedestrian
+  // systems play it for rams and knock-downs.
   crashThud() {
     if (!this.ctx) return;
     const t = this.ctx.currentTime;

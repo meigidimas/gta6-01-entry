@@ -408,7 +408,7 @@ export class Pedestrians {
         if (byPlayer) {
           this.game.police.addHeat(1);
           this.game.hud.toast('You hit a pedestrian! +1 star.', 3000);
-          this.game.audio.blip(140, 0.15);
+          this.game.audio.crashThud();
         }
       }
     };

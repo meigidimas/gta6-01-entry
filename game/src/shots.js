@@ -18,7 +18,7 @@
 // pursuit framing all still render.
 
 import { MISSION_POINTS } from './missions.js';
-import { nearestParkedCar } from './vehicles.js';
+import { nearestParkedSedan } from './vehicles.js';
 
 export function parseShotParams() {
   const params = new URLSearchParams(window.location.search);
@@ -41,11 +41,11 @@ function setMission(game, id, stepIndex) {
   game.missions._startedId = null;
 }
 
-// Put Danny behind the wheel of the nearest parked car, repainted as the
-// hero car, already rolling. Returns the car, or null when no parked car
-// is in range.
+// Put Danny behind the wheel of the nearest parked sedan, repainted as
+// the hero car, already rolling. A sedan, so the hero car never wears a
+// taxi roof sign. Returns the car, or null when no parked car is in range.
 function stageHeroCar(game, paint, x, z, heading, speed) {
-  const car = nearestParkedCar(game.player.position, game.parked, 400);
+  const car = nearestParkedSedan(game.player.position, game.parked, 400);
   if (!car) return null;
   car.setPaint(paint);
   for (const other of game.parked) {
@@ -100,6 +100,13 @@ function stageChaseShot(game) {
   }
   setMission(game, 'hot-pursuit', 1);
   game.setAutopilot({ x: -150, z: 150 });
+  // The chase camera sits behind Danny, so patrol cars closing in from
+  // behind hide behind the camera itself. Swing the staging angle round
+  // to a three-quarter front view: the camera rides ahead of Danny's car
+  // looking back, and the pursuit fills the road behind him. The shot
+  // needs a few seconds of game time before the shutter fires — the
+  // units spawn 1.2 s apart and have to close in from 45–95 m out.
+  game.cameraRig.shotYawOffset = 2.4;
   game.cameraRig.snapTo(car.position, car.heading, 'car');
 }
 

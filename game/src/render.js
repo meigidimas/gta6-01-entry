@@ -77,6 +77,10 @@ export class CameraRig {
     this.yaw = Math.PI;
     this.pitch = CAMERA.pitch;
     this.yawOffset = 0; // mouse drag offset, decays back to zero in a car
+    this.shotYawOffset = 0; // staging-only camera angle, never decays:
+      // the chase screenshot sits the camera at a three-quarter angle so
+      // the patrol cars trailing Danny stay in frame instead of hiding
+      // behind the chase camera. Zero in normal play.
     this.position = new THREE.Vector3(0, 30, 60);
     this.lookAt = new THREE.Vector3();
     this.orbitAngle = 0;
@@ -130,7 +134,9 @@ export class CameraRig {
     if (mode === 'car') {
       this.yawOffset = damp(this.yawOffset, 0, 0.55, dt);
       const behind = heading + Math.PI;
-      this.yaw = dampAngle(this.yaw, behind + this.yawOffset, CAMERA.yawSmooth, dt);
+      this.yaw = dampAngle(
+        this.yaw, behind + this.yawOffset + this.shotYawOffset, CAMERA.yawSmooth, dt,
+      );
     } else {
       this.yaw -= mouseDelta.x * 0.0035;
       this.yaw = dampAngle(this.yaw, this.yaw + this.yawOffset, CAMERA.yawSmooth, dt);
@@ -184,7 +190,9 @@ export class CameraRig {
   }
 
   snapTo(target, heading, mode) {
-    this.yaw = heading + Math.PI;
+    // A staged camera angle applies at once, so a screenshot staged
+    // with one never catches the rig mid-swing toward it.
+    this.yaw = heading + Math.PI + (mode === 'car' ? this.shotYawOffset : 0);
     this.yawOffset = 0;
     this.pitch = CAMERA.pitch;
     const dist = mode === 'car' ? CAMERA.carDistance : CAMERA.footDistance;

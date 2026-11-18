@@ -23,17 +23,9 @@ export class HUD {
     this._trackerText = '';
     this._buildMissionChrome();
     this._listenForMissions();
-    // The game loop never calls a tracker hook, so the tracker refreshes
-    // itself twice a second from the published game handle. Integration
-    // may replace this with a direct updateTracker() call per frame.
-    this._trackerTimer = window.setInterval(() => {
-      try {
-        const game = window.__neonBay ? window.__neonBay.game : null;
-        if (game && game.missions) this.updateTracker(game.missions);
-      } catch {
-        // The tracker is cosmetic; a stale read must never break the HUD.
-      }
-    }, 500);
+    // No timer here: the game loop calls updateTracker() every frame, so
+    // the tracker always reads the live mission state and never reaches
+    // back into the game through a global handle.
   }
 
   _buildMissionChrome() {
@@ -105,8 +97,10 @@ export class HUD {
     });
   }
 
-  // Refresh the tracker panel from a MissionManager. Called on the
-  // tracker's own interval; the game loop may call it directly instead.
+  // Refresh the tracker panel from a MissionManager. Called every frame
+  // by the game loop; the key check below keeps DOM writes to the moments
+  // the mission or the clock actually changes. When no mission is live —
+  // free roam, or every job done — the panel hides itself.
   updateTracker(missions) {
     const tracker = this.el['mission-tracker'];
     if (!tracker || !missions) return;

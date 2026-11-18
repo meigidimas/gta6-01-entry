@@ -136,6 +136,9 @@ export class Car {
     this.parked = parked;
     this.paint = color;
     this.model = model;
+    // Counts hard wall hits: the game loop watches this and plays the
+    // crash thud when it rises, so the car never touches audio itself.
+    this.crashCount = 0;
     // Patrol cars run a hotter engine than civilian traffic.
     this.topSpeed = CAR.maxSpeed;
     const built = buildCarMesh(color, model);
@@ -187,8 +190,13 @@ export class Car {
     this.position.z = nz;
     if (world.resolveCircle(this.position, CAR.radius)) {
       // A wall hit kills most of the speed and nudges the car back out.
+      // A hard one also rings the crash counter once, so the game loop
+      // can play the impact thud without the car knowing about audio.
       const moved = this.position.distanceTo(before);
-      if (moved < Math.abs(this.speed) * dt * 0.4) this.speed *= 0.25;
+      if (moved < Math.abs(this.speed) * dt * 0.4) {
+        if (Math.abs(this.speed) > 4) this.crashCount++;
+        this.speed *= 0.25;
+      }
     }
     this._syncVisuals(dt);
   }
@@ -282,6 +290,16 @@ export function nearestParkedCar(pos, parked, maxDist) {
     }
   }
   return best;
+}
+
+// The nearest parked sedan — the hero car for screenshots and the play
+// scene. A sedan reads as Danny's car; a taxi wears a roof sign, and a
+// van or a sports car reads as set dressing. Falls back to the nearest
+// parked car of any model when no sedan is left standing.
+export function nearestParkedSedan(pos, parked, maxDist) {
+  const sedans = parked.filter((car) => car.model === 'sedan');
+  return nearestParkedCar(pos, sedans, maxDist)
+    || nearestParkedCar(pos, parked, maxDist);
 }
 
 function makeLoopRoute(world, rng) {

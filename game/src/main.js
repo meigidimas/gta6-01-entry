@@ -10,7 +10,7 @@ import { createRng, seedFromString } from './random.js';
 import { World } from './world.js';
 import { CameraRig, ObjectiveMarker, createScene } from './render.js';
 import { Player } from './player.js';
-import { Traffic, createParkedCar, nearestParkedCar } from './vehicles.js';
+import { Traffic, createParkedCar, nearestParkedCar, nearestParkedSedan } from './vehicles.js';
 import { Police } from './police.js';
 import { Pedestrians } from './peds.js';
 import { Combat } from './combat.js';
@@ -72,6 +72,8 @@ export class Game {
     this.lastObjective = '';
     this.titleTime = 0;
     this._punchQueued = false; // a mouse click asks combat for one punch
+    this._crashCar = null; // the car whose crash counter is being watched
+    this._lastCrashCount = 0;
 
     this.accumulator = 0;
     this.lastTime = performance.now();
@@ -265,7 +267,8 @@ export class Game {
     this.state = 'playing';
     this.hud.showScreen('playing');
     // Danny in a yellow car, one wanted star, autopilot to the marina.
-    let car = nearestParkedCar(this.player.position, this.parked, 400);
+    // A sedan, so the hero car never wears a taxi roof sign.
+    let car = nearestParkedSedan(this.player.position, this.parked, 400);
     if (!car) return;
     car.setPaint(0xf2c230);
     // No other yellow cars in the shot: repaint any parked twin so the
@@ -413,6 +416,20 @@ export class Game {
     // Engine sound follows the car.
     this.audio.setEngine(inCar ? Math.abs(this.playerCar.speed) / CAR.maxSpeed : 0, inCar);
 
+    // A wall hit the car just took plays the crash thud once. The counter
+    // is re-synced silently when Danny switches cars, so a fresh car with
+    // a different count never thuds for nothing.
+    const car = this.playerCar;
+    if (car) {
+      if (this._crashCar !== car) {
+        this._crashCar = car;
+        this._lastCrashCount = car.crashCount;
+      } else if (car.crashCount !== this._lastCrashCount) {
+        this._lastCrashCount = car.crashCount;
+        this.audio.crashThud();
+      }
+    }
+
     // Autosave.
     this.autosaveTimer += dt;
     if (this.autosaveTimer >= GAME.autosaveSeconds) {
@@ -470,29 +487,40 @@ export class Game {
     if (!this.stolenCars.has(car)) {
       this.stolenCars.add(car);
       this.police.addHeat(WANTED.stealStars);
-      this.hud.toast('Car stolen! The cops noticed — 1 star.', 3000);
+      // No toast here: the wanted rise already toasts once through the
+      // HUD, and a second one stacked on top of it read as a duplicate.
       this.audio.blip(660, 0.12);
     } else {
       this.audio.blip(520, 0.07);
     }
   }
 
-  _updateMissions() {
-    const ctx = {
+  // The live context the mission steps read: the game itself plus the
+  // pieces steps reach for most. Built fresh each call so the wanted
+  // level and the parked cars are never a stale snapshot.
+  _missionCtx() {
+    return {
+      game: this,
       player: this.player,
       world: this.world,
       parked: this.parked,
       wanted: this.wanted,
       police: this.police,
     };
+  }
+
+  _updateMissions() {
+    const ctx = this._missionCtx();
     const event = this.missions.update(ctx);
     if (event && event.type === 'step') {
-      this.hud.toast('Nice — next: drive to the marina.', 3000);
+      // The toast names the job's own next step, whatever the mission is.
+      const next = this.missions.currentStep;
+      this.hud.toast(next ? `Nice — next: ${next.text}` : 'Nice — step done.', 3000);
       this.audio.blip(880, 0.1);
     } else if (event && event.type === 'mission') {
       this.cash += event.mission.reward;
-      this.hud.toast(MISSION_ONE.complete, 4500);
-      this.audio.success();
+      this.hud.toast(`${event.mission.name} complete! Danny earned $${event.mission.reward}.`, 4500);
+      this.audio.missionComplete();
       this.save();
     }
     const objective = this.missions.objectivePos(ctx);
@@ -505,15 +533,16 @@ export class Game {
     this.hud.setCash(this.cash);
     this.hud.setSpeed(this.playerCar ? this.playerCar.speedKmh : 0, !!this.playerCar);
     this.hud.setHealth(this.player.health, PLAYER.maxHealth);
+    // The mission tracker refreshes from the game loop now, every frame,
+    // instead of on its own timer — the clock stays live and the HUD
+    // no longer reaches back into the game through a global handle.
+    this.hud.updateTracker(this.missions);
     const text = this.missions.objectiveText();
     if (text !== this.lastObjective) {
       this.lastObjective = text;
       this.hud.setObjective(text);
     }
-    const objective = this.missions.objectivePos({
-      player: this.player, world: this.world, parked: this.parked,
-      wanted: this.wanted, police: this.police,
-    });
+    const objective = this.missions.objectivePos(this._missionCtx());
     this.hud.drawMinimap(
       this.world,
       this.player.position,

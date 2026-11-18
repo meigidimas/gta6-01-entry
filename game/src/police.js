@@ -482,7 +482,7 @@ export class Police {
         playerCar.position.z += uz * 1.6;
         playerCar.heading += (this.rng.chance(0.5) ? 1 : -1) * 0.22;
         playerCar.speed *= 0.55;
-        this.game.audio.blip(160, 0.12);
+        this.game.audio.crashThud();
       } else if (unit.heatCooldown <= 0 && closing < -8) {
         // Danny rammed a cop car: that is a crime too.
         unit.heatCooldown = 6;
@@ -506,7 +506,7 @@ export class Police {
       this.world.resolveCircle(player.position, 0.55);
       player.group.position.copy(player.position);
       car.speed *= 0.3;
-      this.game.audio.blip(160, 0.12);
+      this.game.audio.crashThud();
     }
   }
 

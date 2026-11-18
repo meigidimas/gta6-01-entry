@@ -293,7 +293,6 @@ export class MissionManager {
     this._startedId = null;
     // Payback state: the rival car identity plus counted rams.
     this._rival = null;
-    this._rivalKey = null;
     this.ramHits = 0;
     this._lastRamAt = 0;
   }
@@ -377,13 +376,11 @@ export class MissionManager {
       }
     }
     this._rival = best;
-    this._rivalKey = best ? `${best.position.x},${best.position.z}` : null;
     return best;
   }
 
   _resetPayback() {
     this._rival = null;
-    this._rivalKey = null;
     this.ramHits = 0;
     this._lastRamAt = 0;
   }
@@ -399,7 +396,12 @@ export class MissionManager {
     const game = gameOf(ctx);
     const playerCar = game ? game.playerCar : null;
     const speed = playerCar ? Math.abs(playerCar.speed || 0) : 0;
-    if (dist2D(ctx.player.position, rival.position) < 4.5 && speed > 6) {
+    // Traffic separation holds cars 4.5 m apart, so a ram has to count
+    // just outside that ring — 4.5 itself could never trigger, because
+    // separation runs before this check every frame and pushes the cars
+    // back out to exactly 4.5. The speed floor keeps a gentle nudge in
+    // traffic from counting as a ram.
+    if (dist2D(ctx.player.position, rival.position) < 5.2 && speed > 6) {
       this.ramHits++;
       this._lastRamAt = now;
       emitMissionEvent('ram', this.current, { hits: this.ramHits, total: PAYBACK_RAMS });
