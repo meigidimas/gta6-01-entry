@@ -41,6 +41,36 @@ function dampAngle(current, target, rate, dt) {
   return current + diff * (1 - Math.exp(-rate * dt));
 }
 
+// Segment-versus-box test (slab method): returns the first hit fraction
+// t in [0, 1] along p0 -> p1, or null when the segment clears the box.
+// Used to keep the follow camera out of buildings.
+function segmentBoxT(p0, p1, box) {
+  let tmin = 0;
+  let tmax = 1;
+  const axes = [
+    [p0.x, p1.x - p0.x, box.minX, box.maxX],
+    [p0.y, p1.y - p0.y, box.minY, box.maxY],
+    [p0.z, p1.z - p0.z, box.minZ, box.maxZ],
+  ];
+  for (const [origin, dir, lo, hi] of axes) {
+    if (Math.abs(dir) < 1e-9) {
+      if (origin < lo || origin > hi) return null;
+      continue;
+    }
+    let a = (lo - origin) / dir;
+    let b = (hi - origin) / dir;
+    if (a > b) {
+      const tmp = a;
+      a = b;
+      b = tmp;
+    }
+    tmin = Math.max(tmin, a);
+    tmax = Math.min(tmax, b);
+    if (tmin > tmax) return null;
+  }
+  return tmin;
+}
+
 export class CameraRig {
   constructor(camera) {
     this.camera = camera;
@@ -50,6 +80,44 @@ export class CameraRig {
     this.position = new THREE.Vector3(0, 30, 60);
     this.lookAt = new THREE.Vector3();
     this.orbitAngle = 0;
+    this.world = null; // set via setWorld: enables building collision
+  }
+
+  setWorld(world) {
+    this.world = world;
+  }
+
+  // Pull the desired camera spot back along the eye line until it clears
+  // every building, with a little lift so the camera peeks over low roofs
+  // instead of hugging the wall. When the pull-in would crush the camera
+  // right onto the player, lift it instead — a high close shot still
+  // shows the action, a face-full of jacket does not.
+  _avoidBuildings(eye, desired, minDist = 2.4) {
+    if (!this.world) return;
+    let hitT = 1;
+    for (const b of this.world.buildings) {
+      // Skip anything far from the eye line; the city is big and the
+      // camera only ever looks a few metres out.
+      if (Math.abs(b.x - eye.x) > 30 || Math.abs(b.z - eye.z) > 30) continue;
+      const t = segmentBoxT(eye, desired, {
+        minX: b.x - b.w / 2, maxX: b.x + b.w / 2,
+        minY: 0.18, maxY: 0.18 + b.h,
+        minZ: b.z - b.d / 2, maxZ: b.z + b.d / 2,
+      });
+      if (t !== null && t < hitT) hitT = t;
+    }
+    if (hitT >= 1) return;
+    const pull = Math.max(0.12, hitT - 0.06);
+    desired.x = eye.x + (desired.x - eye.x) * pull;
+    desired.y = eye.y + (desired.y - eye.y) * pull + (1 - hitT) * 1.6;
+    desired.z = eye.z + (desired.z - eye.z) * pull;
+    const pulledDist = Math.hypot(
+      desired.x - eye.x, desired.y - eye.y, desired.z - eye.z,
+    );
+    if (pulledDist < minDist) {
+      desired.y += (minDist - pulledDist) * 0.9;
+    }
+    if (desired.y < 1.2) desired.y = 1.2;
   }
 
   update(dt, target, heading, mode, mouseDelta, speed) {
@@ -88,6 +156,13 @@ export class CameraRig {
       target.z + Math.cos(this.yaw) * Math.cos(this.pitch) * dist,
     );
     if (desired.y < 1.2) desired.y = 1.2;
+    // Never let a building sit between the camera and the action. A car
+    // chase wants a little more breathing room than a walk.
+    this._avoidBuildings(
+      new THREE.Vector3(target.x, target.y + 1.4, target.z),
+      desired,
+      mode === 'car' ? 3.4 : 2.4,
+    );
     this.position.x = damp(this.position.x, desired.x, CAMERA.positionSmooth, dt);
     this.position.y = damp(this.position.y, desired.y, CAMERA.positionSmooth, dt);
     this.position.z = damp(this.position.z, desired.z, CAMERA.positionSmooth, dt);
@@ -114,11 +189,17 @@ export class CameraRig {
     this.pitch = CAMERA.pitch;
     const dist = mode === 'car' ? CAMERA.carDistance : CAMERA.footDistance;
     const height = mode === 'car' ? CAMERA.carHeight : CAMERA.footHeight;
-    this.position.set(
+    const desired = new THREE.Vector3(
       target.x + Math.sin(this.yaw) * dist,
       target.y + height,
       target.z + Math.cos(this.yaw) * dist,
     );
+    this._avoidBuildings(
+      new THREE.Vector3(target.x, target.y + 1.4, target.z),
+      desired,
+      mode === 'car' ? 3.4 : 2.4,
+    );
+    this.position.copy(desired);
     this.camera.position.copy(this.position);
     this.camera.lookAt(target.x, target.y + 1.4, target.z);
   }

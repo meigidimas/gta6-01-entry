@@ -11,6 +11,9 @@ import { World } from './world.js';
 import { CameraRig, ObjectiveMarker, createScene } from './render.js';
 import { Player } from './player.js';
 import { Traffic, createParkedCar, nearestParkedCar } from './vehicles.js';
+import { Police } from './police.js';
+import { Pedestrians } from './peds.js';
+import { Combat } from './combat.js';
 import { Input } from './input.js';
 import { HUD } from './hud.js';
 import { AudioEngine } from './audio.js';
@@ -37,13 +40,20 @@ export class Game {
     this.camera = camera;
     this.world = new World(scene, this.rng);
     this.player = new Player(scene, this.world.spawn);
+    // Health lives on the player: combat and police rams damage it, and
+    // zero means WASTED.
+    this.player.health = PLAYER.maxHealth;
     this.cameraRig = new CameraRig(camera);
+    this.cameraRig.setWorld(this.world);
     this.marker = new ObjectiveMarker(scene);
 
     this.parked = this.world.parkingSpots.map((spot) =>
       createParkedCar(scene, spot, this.rng.pick(PALETTE.carPaints)),
     );
     this.traffic = new Traffic(scene, this.world, this.rng.fork());
+    this.police = new Police(scene, this.world, this.rng.fork(), this);
+    this.peds = new Pedestrians(scene, this.world, this.rng.fork(), this);
+    this.combat = new Combat();
 
     this.input = new Input(canvas);
     this.hud = new HUD();
@@ -52,16 +62,16 @@ export class Game {
     this.missions = new MissionManager();
 
     this.state = 'title';
+    this.endReason = 'wasted';
     this.cash = 0;
-    this.health = PLAYER.maxHealth;
     this.wanted = 0;
-    this.wantedTimer = 0;
     this.playerCar = null;
     this.stolenCars = new Set();
     this.autopilot = null; // { waypoints, index, target }
     this.autosaveTimer = 0;
     this.lastObjective = '';
     this.titleTime = 0;
+    this._punchQueued = false; // a mouse click asks combat for one punch
 
     this.accumulator = 0;
     this.lastTime = performance.now();
@@ -73,7 +83,7 @@ export class Game {
     this.hud.showScreen('title');
     this.hud.setWanted(0);
     this.hud.setCash(0);
-    this.hud.setHealth(this.health, PLAYER.maxHealth);
+    this.hud.setHealth(this.player.health, PLAYER.maxHealth);
 
     window.__neonBay = { game: this, version: GAME.version };
 
@@ -105,6 +115,11 @@ export class Game {
     if (quit) quit.addEventListener('click', () => this.toTitle());
     const mute = document.getElementById('mute-btn');
     if (mute) mute.addEventListener('click', () => this.toggleMute());
+    // A click on the canvas throws a punch (the F key does the same).
+    // Clicking a menu button never reaches the canvas, so menus stay safe.
+    canvas.addEventListener('mousedown', (e) => {
+      if (e.button === 0 && this.state === 'playing') this._punchQueued = true;
+    });
   }
 
   _wireResize() {
@@ -162,6 +177,7 @@ export class Game {
     this.hud.showScreen('paused');
     this.input.releasePointerLock();
     this.audio.setEngine(0, false);
+    this.audio.stopSiren();
     this.save();
   }
 
@@ -178,23 +194,53 @@ export class Game {
     this.hud.showScreen('title');
     this.marker.hide();
     this.audio.setEngine(0, false);
+    this.audio.stopSiren();
+    this.police.clearPursuit();
     this.input.releasePointerLock();
     this._applySaveToTitle();
   }
 
-  gameOver() {
+  gameOver(reason = 'wasted') {
+    this.endReason = reason;
     this.state = 'gameover';
     this.hud.showScreen('gameover');
+    const title = document.querySelector('#gameover-screen .wasted');
+    if (title) title.textContent = reason === 'busted' ? 'BUSTED' : 'WASTED';
     this.audio.setEngine(0, false);
     this.audio.stopMusic();
+    this.audio.stopSiren();
     this.input.releasePointerLock();
     this.save();
   }
 
+  // Cornered while slow: the run ends in handcuffs.
+  busted() {
+    if (this.state !== 'playing') return;
+    this.police.clearPursuit();
+    this.hud.toast('BUSTED! The Neon Bay PD got you.', 4000);
+    this.gameOver('busted');
+  }
+
+  // Health hit zero: the run ends in the morgue.
+  wasted() {
+    if (this.state !== 'playing') return;
+    this.police.clearPursuit();
+    this.gameOver('wasted');
+  }
+
+  // Damage from police rams (and, later, anything else that hurts).
+  damagePlayer(amount) {
+    if (this.state !== 'playing' || amount <= 0) return;
+    this.player.health = Math.max(0, this.player.health - amount);
+    this.hud.setHealth(this.player.health, PLAYER.maxHealth);
+    if (this.player.health <= 0) this.wasted();
+  }
+
   restartAfterWasted() {
-    this.health = PLAYER.maxHealth;
-    this.wanted = 0;
-    this.wantedTimer = 0;
+    this.player.health = PLAYER.maxHealth;
+    this.police.clearPursuit();
+    this.peds.reset();
+    this.combat.reset();
     if (this.player.inCar) {
       this.player.exitCar();
       this.playerCar = null;
@@ -243,8 +289,7 @@ export class Game {
     car.group.rotation.y = 0;
     this.player.position.copy(car.position);
     this.player.heading = 0;
-    this.wanted = 1;
-    this.wantedTimer = 0;
+    this.police.setWanted(1);
     this.missions.currentId = MISSION_ONE.id;
     this.missions.stepIndex = 1; // already has the car: drive to the marina
     this.setAutopilot(this.world.marina);
@@ -252,7 +297,7 @@ export class Game {
   }
 
   stageEndShot() {
-    this.health = 0;
+    this.player.health = 0;
     this.gameOver();
     this.cameraRig.snapTo(this.player.position, this.player.heading, 'foot');
   }
@@ -343,9 +388,17 @@ export class Game {
     }
     if (this.input.pressed('KeyM')) this.toggleMute();
 
+    // A punch comes from the F key or a mouse click, once per press.
+    const punch = this.input.pressed('KeyF') || this._punchQueued;
+    this._punchQueued = false;
+
     this._updatePlayerAndCar(dt);
-    this.traffic.update(dt, this.playerCar);
-    this._updateWanted(dt);
+    this.traffic.update(dt, this.playerCar, this.police.cars);
+    this.police.update(dt);
+    this.peds.update(dt);
+    this.combat.update(dt, this, punch);
+    if (this.police.pursuing) this.audio.startSiren();
+    else this.audio.stopSiren();
     this._updateMissions();
     this.marker.update(dt);
 
@@ -402,6 +455,8 @@ export class Game {
     if (near) {
       this.hud.hint('Press E to steal the car');
       if (this.input.pressed('KeyE')) this._stealCar(near);
+    } else if (this.peds.nearest(this.player.position, 3)) {
+      this.hud.hint('F or click to punch — the cops will notice');
     } else {
       this.hud.hint('');
     }
@@ -414,22 +469,11 @@ export class Game {
     this.cameraRig.snapTo(car.position, car.heading, 'car');
     if (!this.stolenCars.has(car)) {
       this.stolenCars.add(car);
-      this.wanted = Math.min(WANTED.maxStars, this.wanted + WANTED.stealStars);
-      this.wantedTimer = 0;
+      this.police.addHeat(WANTED.stealStars);
       this.hud.toast('Car stolen! The cops noticed — 1 star.', 3000);
       this.audio.blip(660, 0.12);
     } else {
       this.audio.blip(520, 0.07);
-    }
-  }
-
-  _updateWanted(dt) {
-    if (this.wanted <= 0) return;
-    this.wantedTimer += dt;
-    if (this.wantedTimer >= WANTED.decaySeconds) {
-      this.wantedTimer = 0;
-      this.wanted--;
-      if (this.wanted === 0) this.hud.toast('You lost the heat.', 2500);
     }
   }
 
@@ -438,6 +482,8 @@ export class Game {
       player: this.player,
       world: this.world,
       parked: this.parked,
+      wanted: this.wanted,
+      police: this.police,
     };
     const event = this.missions.update(ctx);
     if (event && event.type === 'step') {
@@ -458,7 +504,7 @@ export class Game {
     this.hud.setWanted(this.wanted);
     this.hud.setCash(this.cash);
     this.hud.setSpeed(this.playerCar ? this.playerCar.speedKmh : 0, !!this.playerCar);
-    this.hud.setHealth(this.health, PLAYER.maxHealth);
+    this.hud.setHealth(this.player.health, PLAYER.maxHealth);
     const text = this.missions.objectiveText();
     if (text !== this.lastObjective) {
       this.lastObjective = text;
@@ -466,12 +512,13 @@ export class Game {
     }
     const objective = this.missions.objectivePos({
       player: this.player, world: this.world, parked: this.parked,
+      wanted: this.wanted, police: this.police,
     });
     this.hud.drawMinimap(
       this.world,
       this.player.position,
       this.player.heading,
-      this.traffic.cars.map((t) => t.car),
+      this.traffic.cars.map((t) => t.car).concat(this.police.cars),
       objective,
     );
   }
@@ -487,7 +534,7 @@ export class Game {
       const data = {
         version: 1,
         cash: this.cash,
-        health: this.health,
+        health: this.player.health,
         wanted: this.wanted,
         mission: this.missions.save(),
         player: {
@@ -517,9 +564,8 @@ export class Game {
 
   _applySave(data) {
     this.cash = data.cash || 0;
-    this.health = data.health ?? PLAYER.maxHealth;
+    this.player.health = data.health ?? PLAYER.maxHealth;
     this.wanted = data.wanted || 0;
-    this.wantedTimer = 0;
     if (data.mission) this.missions.load(data.mission);
     if (data.player) {
       this.player.teleport(data.player.x, data.player.z, data.player.heading);
@@ -533,8 +579,10 @@ export class Game {
       // Ignore.
     }
     this.cash = 0;
-    this.health = PLAYER.maxHealth;
-    this.wanted = 0;
+    this.player.health = PLAYER.maxHealth;
+    this.police.clearPursuit();
+    this.peds.reset();
+    this.combat.reset();
     this.missions = new MissionManager();
     this.player.teleport(this.world.spawn.x, this.world.spawn.z, Math.PI);
   }
