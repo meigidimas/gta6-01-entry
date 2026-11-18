@@ -1,53 +1,111 @@
-// Keyboard and pointer input. Held keys give a steering direction; one-shot presses (start or
-// restart, pause) are queued as bit flags and taken once by the loop, so a press between two
-// frames is never lost and never counted twice.
+// Neon Bay Heat — keyboard and mouse input.
+// One object owns the key state, edge-triggered presses and the mouse
+// orbit deltas the camera consumes each frame.
 
-export const ACTION_CONFIRM = 1;
-export const ACTION_PAUSE = 2;
+export class Input {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.down = new Set(); // codes currently held
+    this.pressed = new Set(); // codes pressed since the last poll
+    this.mouseDX = 0; // accumulated horizontal drag, pixels
+    this.mouseDY = 0; // accumulated vertical drag, pixels
+    this.dragging = false;
+    this.pointerLocked = false;
+    this.lastX = 0;
+    this.lastY = 0;
 
-const LEFT = new Set(['ArrowLeft', 'KeyA']);
-const RIGHT = new Set(['ArrowRight', 'KeyD']);
-const CONFIRM = new Set(['Space', 'Enter']);
-const PAUSE = new Set(['KeyP', 'Escape']);
+    window.addEventListener('keydown', (event) => {
+      if (event.repeat) return;
+      this.down.add(event.code);
+      this.pressed.add(event.code);
+      // Keep the page from scrolling on game keys.
+      if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab'].includes(event.code)) {
+        event.preventDefault();
+      }
+    });
+    window.addEventListener('keyup', (event) => {
+      this.down.delete(event.code);
+    });
+    window.addEventListener('blur', () => {
+      this.down.clear();
+      this.dragging = false;
+    });
 
-export function createInput(target) {
-  let left = false;
-  let right = false;
-  let actions = 0;
+    canvas.addEventListener('mousedown', (event) => {
+      this.dragging = true;
+      this.lastX = event.clientX;
+      this.lastY = event.clientY;
+    });
+    window.addEventListener('mousemove', (event) => {
+      if (this.pointerLocked) {
+        this.mouseDX += event.movementX || 0;
+        this.mouseDY += event.movementY || 0;
+        return;
+      }
+      if (!this.dragging) return;
+      this.mouseDX += event.clientX - this.lastX;
+      this.mouseDY += event.clientY - this.lastY;
+      this.lastX = event.clientX;
+      this.lastY = event.clientY;
+    });
+    window.addEventListener('mouseup', () => {
+      this.dragging = false;
+    });
+    document.addEventListener('pointerlockchange', () => {
+      this.pointerLocked = document.pointerLockElement === canvas;
+    });
+  }
 
-  window.addEventListener('keydown', (event) => {
-    if (LEFT.has(event.code)) left = true;
-    else if (RIGHT.has(event.code)) right = true;
-    else if (CONFIRM.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_CONFIRM;
-    } else if (PAUSE.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_PAUSE;
-    } else return;
-    event.preventDefault();
-  });
-  window.addEventListener('keyup', (event) => {
-    if (LEFT.has(event.code)) left = false;
-    else if (RIGHT.has(event.code)) right = false;
-  });
-  // A key released while the tab is hidden never sends keyup: let go of everything on blur.
-  window.addEventListener('blur', () => {
-    left = false;
-    right = false;
-  });
-  target.addEventListener('pointerdown', () => {
-    actions |= ACTION_CONFIRM;
-  });
+  // Ask the browser to lock the pointer to the canvas (driving camera).
+  // Fails silently when the browser refuses; drag-orbit still works.
+  requestPointerLock() {
+    try {
+      const promise = this.canvas.requestPointerLock({ unadjustedMovement: true });
+      if (promise && typeof promise.catch === 'function') promise.catch(() => {});
+    } catch {
+      try { this.canvas.requestPointerLock(); } catch { /* drag fallback */ }
+    }
+  }
 
-  return {
-    /** -1 for left, 1 for right, 0 for neither or both. */
-    direction() {
-      return (right ? 1 : 0) - (left ? 1 : 0);
-    },
-    /** The one-shot presses since the last call, as ACTION_* flags. */
-    takeActions() {
-      const taken = actions;
-      actions = 0;
-      return taken;
-    },
-  };
+  releasePointerLock() {
+    if (document.pointerLockElement) document.exitPointerLock();
+  }
+
+  isDown(code) {
+    return this.down.has(code);
+  }
+
+  // True once per physical press; consumed by the caller.
+  wasPressed(code) {
+    return this.pressed.has(code);
+  }
+
+  // Driving / walking axis in [-1, 1]: forward is +1.
+  throttleAxis() {
+    let value = 0;
+    if (this.isDown('KeyW') || this.isDown('ArrowUp')) value += 1;
+    if (this.isDown('KeyS') || this.isDown('ArrowDown')) value -= 1;
+    return value;
+  }
+
+  // Steering axis in [-1, 1]: right is +1.
+  steerAxis() {
+    let value = 0;
+    if (this.isDown('KeyD') || this.isDown('ArrowRight')) value += 1;
+    if (this.isDown('KeyA') || this.isDown('ArrowLeft')) value -= 1;
+    return value;
+  }
+
+  // Mouse movement since the last call, then zeroed.
+  consumeMouseDelta() {
+    const delta = { dx: this.mouseDX, dy: this.mouseDY };
+    this.mouseDX = 0;
+    this.mouseDY = 0;
+    return delta;
+  }
+
+  // Edge presses are single-frame; call once per rendered frame.
+  endFrame() {
+    this.pressed.clear();
+  }
 }
