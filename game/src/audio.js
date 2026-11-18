@@ -5,6 +5,23 @@
 
 import { AUDIO } from './config.js';
 
+// Siren distance attenuation: full volume inside SIREN_NEAR, a smooth
+// smoothstep falloff out to SIREN_FAR, silent beyond it. Extra units add
+// presence (+30% each, up to three extra), but the total is hard-capped
+// at SIREN_MAX_GAIN — the cap binds from four units up, so five sirens
+// wailing at once never clip the master bus.
+const SIREN_NEAR = 12;
+const SIREN_FAR = 130;
+const SIREN_BASE_GAIN = 0.05;
+const SIREN_MAX_GAIN = 0.09;
+
+export function sirenLevelForDistance(dist, units = 1) {
+  const t = Math.min(1, Math.max(0, (dist - SIREN_NEAR) / (SIREN_FAR - SIREN_NEAR)));
+  const falloff = 1 - t * t * (3 - 2 * t);
+  const countBoost = 1 + 0.3 * Math.min(Math.max(units - 1, 0), 3);
+  return Math.min(SIREN_MAX_GAIN, SIREN_BASE_GAIN * falloff * countBoost);
+}
+
 // Two four-chord loops the soundtrack alternates between, each chord with
 // a bass root an octave below it. Loop A is the original minor drive;
 // loop B is a brighter lift for the second pass, so long drives stop
@@ -293,6 +310,19 @@ export class AudioEngine {
     this.sirenGain.connect(this.master);
     this.sirenOsc.start();
     this.sirenLfo.start();
+  }
+
+  // Drive the siren's volume from the nearest unit's distance (and how
+  // many units are out). Called every frame while a pursuit runs; the
+  // gain glides, so a cop rounding the corner swells in instead of
+  // popping, and a cop left behind fades out. No-op when the siren is
+  // not running.
+  setSirenLevel(dist, units = 1) {
+    if (!this.ctx || !this.sirenGain) return;
+    const target = sirenLevelForDistance(dist, units);
+    this.sirenGain.gain.setTargetAtTime(
+      Math.max(target, 0.0001), this.ctx.currentTime, 0.15,
+    );
   }
 
   stopSiren() {

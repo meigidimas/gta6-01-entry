@@ -2,7 +2,9 @@
 // Folks out for a walk along the sidewalks. They stroll their block, turn
 // at intersections, scatter when a car comes at them fast or a fight
 // breaks out nearby, and go down hard when a car clips them — which the
-// cops notice, if Danny was driving.
+// cops notice, if Danny was driving. This file also builds the foot
+// officers (buildOfficerFigure): the same box-built figure in Neon Bay
+// PD navy, whose chase behaviour lives in the police module.
 
 import * as THREE from 'three';
 import { CITY, PLAYER } from './config.js';
@@ -60,6 +62,63 @@ function buildPedFigure(rng) {
   armL.position.set(-0.4, 1.4, 0);
   group.add(armL);
   const armR = new THREE.Mesh(armGeo, shirt);
+  armR.position.set(0.4, 1.4, 0);
+  group.add(armR);
+
+  return { group, legL, legR, armL, armR };
+}
+
+// A foot officer: the same box-built figure as a pedestrian, in Neon Bay
+// PD navy with a peaked cap and a small gold badge on the chest. The
+// police module owns officer behaviour; this only builds the body, with
+// the same pivoted limbs so the same walk cycle drives it.
+export function buildOfficerFigure(rng) {
+  const group = new THREE.Group();
+  const skin = new THREE.MeshLambertMaterial({ color: rng.pick(SKINS) });
+  const navy = new THREE.MeshLambertMaterial({ color: 0x1c2f4a });
+  const dark = new THREE.MeshLambertMaterial({ color: 0x14181d });
+  const badgeMat = new THREE.MeshLambertMaterial({
+    color: 0xf2c230, emissive: 0x8a6d00, emissiveIntensity: 0.4,
+  });
+
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.68, 0.32), navy);
+  torso.position.y = 1.1;
+  torso.castShadow = true;
+  group.add(torso);
+
+  const badge = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.14, 0.04), badgeMat);
+  badge.position.set(-0.16, 1.22, 0.18);
+  group.add(badge);
+
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.4, 0.36), skin);
+  head.position.y = 1.68;
+  head.castShadow = true;
+  group.add(head);
+
+  const crown = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.16, 0.4), navy);
+  crown.position.y = 1.92;
+  group.add(crown);
+  const brim = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.05, 0.22), dark);
+  brim.position.set(0, 1.86, 0.28);
+  group.add(brim);
+
+  const legGeo = new THREE.BoxGeometry(0.22, 0.76, 0.26);
+  legGeo.translate(0, -0.38, 0);
+  const legL = new THREE.Mesh(legGeo, dark);
+  legL.position.set(-0.15, 0.76, 0);
+  legL.castShadow = true;
+  group.add(legL);
+  const legR = new THREE.Mesh(legGeo, dark);
+  legR.position.set(0.15, 0.76, 0);
+  legR.castShadow = true;
+  group.add(legR);
+
+  const armGeo = new THREE.BoxGeometry(0.17, 0.62, 0.2);
+  armGeo.translate(0, -0.31, 0);
+  const armL = new THREE.Mesh(armGeo, navy);
+  armL.position.set(-0.4, 1.4, 0);
+  group.add(armL);
+  const armR = new THREE.Mesh(armGeo, navy);
   armR.position.set(0.4, 1.4, 0);
   group.add(armR);
 

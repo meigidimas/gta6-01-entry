@@ -7,7 +7,9 @@
 //   2. The Drop — pick up a package uptown, deliver it to the marina
 //      before the clock runs out. $400.
 //   3. Hot Pursuit — earn 2 wanted stars, then lose the heat. $500.
-//   4. Payback — chase the rival's car and ram it until it quits. $600.
+//   4. Payback — chase the rival's dedicated magenta car and ram it
+//      until it quits; let it stay far away for too long and it escapes,
+//      restarting the job. $600.
 //   5. The Big Score — pick up the crew, hit the vault, escape hot. $1,000.
 //
 // Steps reach the wanted level and the police only through small guarded
@@ -46,6 +48,8 @@ const REWARDS = {
 const DROP_TIME_LIMIT = 150; // seconds to finish The Drop once it starts
 const PAYBACK_RAMS = 5; // solid hits that disable the rival's car
 const PAYBACK_RAM_COOLDOWN = 1.5; // seconds between counted hits
+const PAYBACK_ESCAPE_DIST = 150; // the rival escapes past this range...
+const PAYBACK_ESCAPE_SECONDS = 8; // ...held for this long
 
 function dist2D(a, b) {
   return Math.hypot(a.x - b.x, a.z - b.z);
@@ -210,7 +214,7 @@ export const MISSIONS = {
     reward: REWARDS['payback'],
     steps: [
       {
-        text: 'Chase down the rival\'s car — it is marked on your map.',
+        text: 'Chase down the rival\'s magenta car — it is marked on your map.',
         check(ctx, mgr) {
           const rival = mgr.rivalCar(ctx);
           return rival
@@ -294,7 +298,11 @@ export class MissionManager {
     // Payback state: the rival car identity plus counted rams.
     this._rival = null;
     this.ramHits = 0;
-    this._lastRamAt = 0;
+    // -Infinity, not 0: the ram cooldown compares against
+    // performance.now(), and 0 would read as "rammed at page load" and
+    // block the first hit for 1.5 s of a fresh session.
+    this._lastRamAt = -Infinity;
+    this._escapeSince = 0; // game clock when the rival first got far away
   }
 
   get current() {
@@ -356,10 +364,21 @@ export class MissionManager {
     }
   }
 
-  // The rival for Payback: the traffic car nearest the player when the
-  // mission starts, kept by identity for the whole mission. Traffic cars
-  // have no health model, so "disabled" is counted rams instead.
+  // The rival entity for Payback: the dedicated RivalCar the game spawns
+  // when the mission starts, or null when there is none.
+  rivalEntity(ctx) {
+    const game = gameOf(ctx);
+    return game && game.rival ? game.rival : null;
+  }
+
+  // The rival for Payback: the dedicated car when the game spawned one,
+  // kept by identity for the whole mission. If the game never spawned
+  // one — an old save, a missing hook — fall back to the nearest traffic
+  // car so the mission never soft-locks. Rival cars have no health
+  // model, so "disabled" is counted rams instead.
   rivalCar(ctx) {
+    const entity = this.rivalEntity(ctx);
+    if (entity) return entity.car;
     const traffic = trafficOf(ctx);
     const cars = traffic && Array.isArray(traffic.cars)
       ? traffic.cars.map((t) => t.car || t).filter(Boolean)
@@ -382,7 +401,8 @@ export class MissionManager {
   _resetPayback() {
     this._rival = null;
     this.ramHits = 0;
-    this._lastRamAt = 0;
+    this._lastRamAt = -Infinity;
+    this._escapeSince = 0;
   }
 
   // Count a ram: the player is driving fast and brushes the rival's car.
@@ -404,6 +424,11 @@ export class MissionManager {
     if (dist2D(ctx.player.position, rival.position) < 5.2 && speed > 6) {
       this.ramHits++;
       this._lastRamAt = now;
+      if (this.ramHits >= PAYBACK_RAMS) {
+        // The final hit kills the rival's engine on the spot.
+        const entity = this.rivalEntity(ctx);
+        if (entity && typeof entity.disable === 'function') entity.disable();
+      }
       emitMissionEvent('ram', this.current, { hits: this.ramHits, total: PAYBACK_RAMS });
     }
   }
@@ -450,7 +475,19 @@ export class MissionManager {
     // greet it even though the game loop never calls a start hook.
     if (this._startedId !== mission.id) {
       this._startedId = mission.id;
-      if (mission.id === 'payback') this._resetPayback();
+      if (mission.id === 'payback') {
+        this._resetPayback();
+        // Field the dedicated rival car; a failed spawn just means the
+        // mission falls back to a traffic car (see rivalCar).
+        const game = gameOf(ctx);
+        if (game && typeof game.spawnRivalCar === 'function') {
+          try {
+            game.spawnRivalCar();
+          } catch {
+            // Fallback rival below; the mission goes on.
+          }
+        }
+      }
       emitMissionEvent('start', mission);
     }
 
@@ -464,6 +501,36 @@ export class MissionManager {
       this._timerMission = null;
       emitMissionEvent('fail', mission);
       return { type: 'fail', mission };
+    }
+
+    // Payback fails when the rival stays far away for too long: back to
+    // step one with a fresh rival, so the player can retry immediately.
+    if (mission.id === 'payback') {
+      const rival = this.rivalCar(ctx);
+      if (rival && dist2D(ctx.player.position, rival.position) > PAYBACK_ESCAPE_DIST) {
+        const now = performance.now() / 1000;
+        if (this._escapeSince === 0) {
+          this._escapeSince = now;
+        } else if (now - this._escapeSince > PAYBACK_ESCAPE_SECONDS) {
+          this.stepIndex = 0;
+          this._resetPayback();
+          // Clearing the started flag re-runs the start branch next
+          // update, which spawns a fresh rival near the player.
+          this._startedId = null;
+          const game = gameOf(ctx);
+          if (game && typeof game.removeRivalCar === 'function') {
+            try {
+              game.removeRivalCar();
+            } catch {
+              // Already gone; the retry spawns a new one.
+            }
+          }
+          emitMissionEvent('fail', mission);
+          return { type: 'fail', mission };
+        }
+      } else {
+        this._escapeSince = 0;
+      }
     }
 
     this._countRams(ctx);
@@ -489,6 +556,17 @@ export class MissionManager {
       this.completed.push(mission.id);
       this._timerMission = null;
       const finished = mission;
+      if (finished.id === 'payback') {
+        // Job done: the disabled rival leaves the city with the mission.
+        const game = gameOf(ctx);
+        if (game && typeof game.removeRivalCar === 'function') {
+          try {
+            game.removeRivalCar();
+          } catch {
+            // Already gone; the payout still lands.
+          }
+        }
+      }
       this.currentId = this._nextMissionId(finished.id);
       this.stepIndex = 0;
       if (this.currentId === 'payback') this._resetPayback();

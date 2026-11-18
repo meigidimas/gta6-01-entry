@@ -10,7 +10,7 @@ import { createRng, seedFromString } from './random.js';
 import { World } from './world.js';
 import { CameraRig, ObjectiveMarker, createScene } from './render.js';
 import { Player } from './player.js';
-import { Traffic, createParkedCar, nearestParkedCar, nearestParkedSedan } from './vehicles.js';
+import { RivalCar, Traffic, createParkedCar, nearestParkedCar, nearestParkedSedan } from './vehicles.js';
 import { Police } from './police.js';
 import { Pedestrians } from './peds.js';
 import { Combat } from './combat.js';
@@ -66,6 +66,7 @@ export class Game {
     this.cash = 0;
     this.wanted = 0;
     this.playerCar = null;
+    this.rival = null; // the Payback rival car, while that mission is live
     this.stolenCars = new Set();
     this.autopilot = null; // { waypoints, index, target }
     this.autosaveTimer = 0;
@@ -324,6 +325,60 @@ export class Game {
     this.autopilot = null;
   }
 
+  // The siren follows the pursuit: it swells as the nearest unit closes
+  // in, fades as the pursuit falls behind, and stops when the heat is
+  // off. Kept out of the main update body so the siren's lifecycle
+  // stays in one place.
+  _updateSiren() {
+    if (this.police.pursuing) {
+      this.audio.startSiren();
+      this.audio.setSirenLevel(
+        this.police.nearestUnitDistance(), this.police.units,
+      );
+    } else {
+      this.audio.stopSiren();
+    }
+  }
+
+  // ----- the Payback rival -----
+
+  // Spawn the rival on a road 55–80 m from Danny, nose away from him,
+  // when the Payback mission starts. A second call while one is live is
+  // a no-op, so a re-staged mission never fields two rivals.
+  spawnRivalCar() {
+    if (this.rival) return;
+    const from = this.player.position;
+    let spot = null;
+    for (let i = 0; i < 10; i++) {
+      const p = this.world.randomRoadPoint(this.rng);
+      const d = Math.hypot(p.x - from.x, p.z - from.z);
+      if (d >= 55 && d <= 80) {
+        spot = p;
+        break;
+      }
+    }
+    if (!spot) {
+      // Fallback: 60 m along the nearest road from Danny, clamped to
+      // the road grid — an unclamped hop from the east edge road would
+      // have dropped the rival in the sea.
+      const near = this.world.nearestRoadPoint(from.x, from.z);
+      spot = {
+        x: THREE.MathUtils.clamp(near.x + 60, -150, 150),
+        z: THREE.MathUtils.clamp(near.z, -150, 150),
+      };
+    }
+    const heading = Math.atan2(spot.x - from.x, spot.z - from.z);
+    this.rival = new RivalCar(
+      this.scene, this.world, this.rng.fork(), spot.x, spot.z, heading,
+    );
+  }
+
+  removeRivalCar() {
+    if (!this.rival) return;
+    this.rival.remove(this.scene);
+    this.rival = null;
+  }
+
   _updateAutopilot(dt) {
     const car = this.playerCar;
     const ap = this.autopilot;
@@ -396,12 +451,21 @@ export class Game {
     this._punchQueued = false;
 
     this._updatePlayerAndCar(dt);
-    this.traffic.update(dt, this.playerCar, this.police.cars);
+    this.traffic.update(
+      dt,
+      this.playerCar,
+      this.police.cars.concat(this.rival ? [this.rival.car] : []),
+    );
+    if (this.rival) {
+      // The rival brakes for traffic, police and Danny's car alike.
+      const others = this.traffic.cars.map((t) => t.car).concat(this.police.cars);
+      if (this.playerCar) others.push(this.playerCar);
+      this.rival.update(dt, this.player, this.playerCar, others);
+    }
     this.police.update(dt);
     this.peds.update(dt);
     this.combat.update(dt, this, punch);
-    if (this.police.pursuing) this.audio.startSiren();
-    else this.audio.stopSiren();
+    this._updateSiren();
     this._updateMissions();
     this.marker.update(dt);
 
@@ -522,6 +586,14 @@ export class Game {
       this.hud.toast(`${event.mission.name} complete! Danny earned $${event.mission.reward}.`, 4500);
       this.audio.missionComplete();
       this.save();
+    } else if (event && event.type === 'fail') {
+      // The fail stinger already plays through the mission event bridge;
+      // the toast just says what happened. (This also covers The Drop's
+      // clock running out, which used to fail in silence.)
+      const text = event.mission.id === 'payback'
+        ? 'The rival got away — Payback restarts. Chase it down again.'
+        : `${event.mission.name} failed — the clock ran out. Try again!`;
+      this.hud.toast(text, 4000);
     }
     const objective = this.missions.objectivePos(ctx);
     if (objective) this.marker.setPosition(objective.x, objective.z);
@@ -543,11 +615,16 @@ export class Game {
       this.hud.setObjective(text);
     }
     const objective = this.missions.objectivePos(this._missionCtx());
+    const minimapCars = this.traffic.cars.map((t) => t.car).concat(this.police.cars);
+    if (this.rival) minimapCars.push(this.rival.car);
+    for (const officer of this.police.officers) {
+      minimapCars.push({ position: officer.figure.group.position });
+    }
     this.hud.drawMinimap(
       this.world,
       this.player.position,
       this.player.heading,
-      this.traffic.cars.map((t) => t.car).concat(this.police.cars),
+      minimapCars,
       objective,
     );
   }
@@ -612,6 +689,7 @@ export class Game {
     this.police.clearPursuit();
     this.peds.reset();
     this.combat.reset();
+    this.removeRivalCar();
     this.missions = new MissionManager();
     this.player.teleport(this.world.spawn.x, this.world.spawn.z, Math.PI);
   }

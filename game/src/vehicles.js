@@ -2,6 +2,8 @@
 // Driving is a scalar speed along the car's heading with strong lateral
 // grip, so it feels planted without a full physics engine. Traffic cars
 // cruise rectangular loops around city blocks and reverse out when stuck.
+// The Payback rival lives here too: a dedicated striped sports car with
+// its own fleeing AI (RivalCar), not a traffic car with a marker on it.
 
 import * as THREE from 'three';
 import { CAR, CITY, PALETTE, TRAFFIC } from './config.js';
@@ -19,6 +21,7 @@ function buildCarMesh(paint, model = 'sedan') {
     sedan: { w: 1.9, h: 0.62, l: 4.2, y: 0.62, cabin: true },
     van: { w: 2.0, h: 1.5, l: 4.7, y: 1.02, cabin: false },
     sports: { w: 1.95, h: 0.5, l: 4.3, y: 0.54, cabin: true },
+    rival: { w: 1.95, h: 0.5, l: 4.3, y: 0.54, cabin: true },
     taxi: { w: 1.9, h: 0.62, l: 4.2, y: 0.62, cabin: true },
     police: { w: 1.9, h: 0.62, l: 4.2, y: 0.62, cabin: true },
   }[model] || { w: 1.9, h: 0.62, l: 4.2, y: 0.62, cabin: true };
@@ -44,7 +47,7 @@ function buildCarMesh(paint, model = 'sedan') {
     group.add(shield);
   }
 
-  if (model === 'sports') {
+  if (model === 'sports' || model === 'rival') {
     // Low nose, rear spoiler.
     const spoiler = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.08, 0.4), darkMat);
     spoiler.position.set(0, 1.15, -2.0);
@@ -54,6 +57,18 @@ function buildCarMesh(paint, model = 'sedan') {
       strut.position.set(sx, 0.98, -2.0);
       group.add(strut);
     }
+  }
+
+  if (model === 'rival') {
+    // Black racing stripes down the hood and roof: the rival reads as
+    // the mark from across the street, not just another magenta car.
+    const stripeMat = new THREE.MeshLambertMaterial({ color: 0x14181d });
+    const hoodStripe = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.04, 1.3), stripeMat);
+    hoodStripe.position.set(0, dims.y + dims.h / 2 + 0.02, 1.35);
+    group.add(hoodStripe);
+    const roofStripe = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.04, 1.9), stripeMat);
+    roofStripe.position.set(0, dims.y + 0.92, -0.25);
+    group.add(roofStripe);
   }
 
   if (model === 'taxi') {
@@ -201,7 +216,7 @@ export class Car {
     this._syncVisuals(dt);
   }
 
-  driveToward(dt, tx, tz, cruiseSpeed, world) {
+  driveToward(dt, tx, tz, cruiseSpeed, world, opts = {}) {
     // Point the nose at (tx, tz) and hold a cruise speed. Returns distance.
     const dx = tx - this.position.x;
     const dz = tz - this.position.z;
@@ -214,8 +229,17 @@ export class Car {
     let throttle = 0;
     if (this.speed < cruiseSpeed) throttle = 0.7;
     else if (this.speed > cruiseSpeed + 2) throttle = -0.4;
-    // Slow down for sharp turns so traffic does not swing wide.
-    if (Math.abs(diff) > 0.7 && this.speed > 6) throttle = -0.6;
+    // Slow down for sharp turns so traffic does not swing wide. The
+    // pursuit opts out on the open road (brakeForTurns: false): a cop
+    // that braked for every route corner lost ~70 m to Danny at each
+    // one and never closed (harness loop1). turnBrakeFloor raises the
+    // speed the braking stops at — the pursuit passes a higher floor
+    // close in, so the cop sheds speed for the turn but keeps pace
+    // instead of dropping to a crawl at every one.
+    const brakeFloor = opts.turnBrakeFloor ?? 6;
+    if (opts.brakeForTurns !== false && Math.abs(diff) > 0.7 && this.speed > brakeFloor) {
+      throttle = -0.6;
+    }
     this.drive(dt, throttle, steer, world);
     return dist;
   }
@@ -275,6 +299,18 @@ export function createPoliceCar(scene, x, z, heading) {
     x, z, heading, color: 0xf2f4f6, model: 'police',
   });
   car.topSpeed = 42;
+  return car;
+}
+
+// The Payback rival's car: magenta, striped, spoilered, and a touch
+// slower flat-out than Danny's best (36 vs 38 m/s), so a committed chase
+// always catches it — the rubber-band in RivalCar keeps it tense, not
+// the top speed.
+export function createRivalCar(scene, x, z, heading) {
+  const car = new Car(scene, {
+    x, z, heading, color: 0xd63384, model: 'rival',
+  });
+  car.topSpeed = 36;
   return car;
 }
 
@@ -444,5 +480,160 @@ export class Traffic {
         }
       }
     }
+  }
+}
+
+// The Payback rival: a dedicated car with its own fleeing AI. It runs
+// road routes away from Danny and rubber-bands its cruise speed — quick
+// when Danny is close, easing off when he falls far behind — so the
+// chase stays tense without ever becoming uncatchable. Five solid rams
+// disable it; the mission counts those, this class only drives and stops.
+export class RivalCar {
+  constructor(scene, world, rng, x, z, heading) {
+    this.world = world;
+    this.rng = rng;
+    this.car = createRivalCar(scene, x, z, heading);
+    this.state = 'flee'; // 'flee' | 'disabled'
+    this.route = [];
+    this.routeIndex = 0;
+    this.routeTimer = 0;
+    this.holdTimer = 0;
+    this.holdX = x;
+    this.holdZ = z;
+    this.stuckTimer = 0;
+    this.reverseTimer = 0;
+    this.reverseSteer = 0.7;
+    this.lastX = x;
+    this.lastZ = z;
+  }
+
+  get position() {
+    return this.car.position;
+  }
+
+  disable() {
+    if (this.state === 'disabled') return;
+    this.state = 'disabled';
+    this.car.speed = 0;
+  }
+
+  remove(scene) {
+    scene.remove(this.car.group);
+  }
+
+  update(dt, player, playerCar, others = []) {
+    const car = this.car;
+    if (this.state === 'disabled') {
+      car.speed = 0;
+      return;
+    }
+    if (this.reverseTimer > 0) {
+      this.reverseTimer -= dt;
+      car.drive(dt, -0.8, this.reverseSteer, this.world);
+      return;
+    }
+    const dist = Math.hypot(
+      car.position.x - player.position.x,
+      car.position.z - player.position.z,
+    );
+    if (!playerCar) {
+      // Danny is on foot: the rival loiters on a nearby road instead of
+      // racing off, so the job stays playable — steal a car and the
+      // chase is on. The hold point drifts every few seconds so the
+      // rival never looks parked.
+      this.holdTimer -= dt;
+      if (this.holdTimer <= 0) {
+        this.holdTimer = 4;
+        const dx = car.position.x - player.position.x;
+        const dz = car.position.z - player.position.z;
+        const d = Math.hypot(dx, dz) || 1;
+        const hold = this.world.nearestRoadPoint(
+          THREE.MathUtils.clamp(player.position.x + (dx / d) * 28, -150, 150),
+          THREE.MathUtils.clamp(player.position.z + (dz / d) * 28, -150, 150),
+        );
+        this.holdX = hold.x;
+        this.holdZ = hold.z;
+      }
+      const holdDist = Math.hypot(car.position.x - this.holdX, car.position.z - this.holdZ);
+      if (holdDist < 6) {
+        if (Math.abs(car.speed) > 0.5) {
+          car.drive(dt, car.speed > 0 ? -1 : 0.5, 0, this.world);
+        } else {
+          car.speed = 0;
+        }
+      } else {
+        car.driveToward(dt, this.holdX, this.holdZ, 10, this.world);
+      }
+      this._recoverIfStuck(dt);
+      return;
+    }
+    // Fleeing: an L-shaped road route away from Danny, rebuilt often so
+    // the rival reacts when the chase turns a corner. The flee target
+    // is the road point ~90 m out that gets farthest from Danny, with a
+    // bonus for the straight-away direction — sampling eight directions
+    // instead of running blindly away keeps the rival turning along the
+    // edge roads instead of pinning itself against the world limit when
+    // Danny herds it to the map edge (harness rival chase).
+    this.routeTimer -= dt;
+    if (this.routeTimer <= 0 || this.routeIndex >= this.route.length) {
+      this.routeTimer = 1.5;
+      this.routeIndex = 0;
+      const dx = car.position.x - player.position.x;
+      const dz = car.position.z - player.position.z;
+      const d = Math.hypot(dx, dz) || 1;
+      const awayX = dx / d;
+      const awayZ = dz / d;
+      const start = this.world.nearestRoadPoint(car.position.x, car.position.z);
+      let best = null;
+      let bestScore = -Infinity;
+      for (let i = 0; i < 8; i++) {
+        const angle = (i / 8) * Math.PI * 2;
+        const dirX = Math.sin(angle);
+        const dirZ = Math.cos(angle);
+        const tx = THREE.MathUtils.clamp(car.position.x + dirX * 90, -150, 150);
+        const tz = THREE.MathUtils.clamp(car.position.z + dirZ * 90, -150, 150);
+        const p = this.world.nearestRoadPoint(tx, tz);
+        const score = Math.hypot(p.x - player.position.x, p.z - player.position.z)
+          + 20 * (dirX * awayX + dirZ * awayZ);
+        if (score > bestScore) {
+          bestScore = score;
+          best = p;
+        }
+      }
+      const end = best || start;
+      this.route = [start, { x: end.x, z: start.z }, end];
+    }
+    const wp = this.route[this.routeIndex];
+    // Rubber-band: quick when Danny breathes down its neck, easing off
+    // when he drops back, so the chase stays tense but catchable — the
+    // player's 38 m/s always beats the rival's 34 m/s best.
+    let cruise = 34;
+    if (dist > 70) cruise = 20;
+    else if (dist > 40) cruise = 26;
+    else if (dist > 18) cruise = 31;
+    // Brake for traffic ahead instead of piling into it.
+    const gap = car.gapAhead(others, 16, 2.6);
+    if (gap < 7) cruise = 0;
+    else if (gap < 16) cruise = Math.min(cruise, 26 * ((gap - 7) / 9));
+    const d = car.driveToward(dt, wp.x, wp.z, cruise, this.world);
+    if (d < 6) this.routeIndex++;
+    this._recoverIfStuck(dt);
+  }
+
+  _recoverIfStuck(dt) {
+    const car = this.car;
+    const moved = Math.hypot(car.position.x - this.lastX, car.position.z - this.lastZ);
+    if (moved < 0.4 && Math.abs(car.speed) < 1.5) {
+      this.stuckTimer += dt;
+      if (this.stuckTimer > 2) {
+        this.stuckTimer = 0;
+        this.reverseSteer = -this.reverseSteer;
+        this.reverseTimer = 1.1;
+      }
+    } else {
+      this.stuckTimer = 0;
+    }
+    this.lastX = car.position.x;
+    this.lastZ = car.position.z;
   }
 }

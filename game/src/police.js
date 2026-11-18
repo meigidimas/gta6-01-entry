@@ -3,11 +3,15 @@
 // Danny whether he is driving or on foot, a helicopter circles overhead
 // with a spotlight from three stars up, and the heat only cools when Danny
 // stays out of sight for a while. Get cornered while slow and it is
-// BUSTED; let a ram drop your health to zero and it is WASTED.
+// BUSTED; let a ram drop your health to zero and it is WASTED. On foot,
+// foot officers join the chase too: they run Danny down, and one holding
+// him for a second and a bit makes the arrest — punch back or get in a
+// car to break free.
 
 import * as THREE from 'three';
-import { WANTED } from './config.js';
+import { PLAYER, WANTED } from './config.js';
 import { createPoliceCar } from './vehicles.js';
+import { buildOfficerFigure } from './peds.js';
 
 // How many patrol cars each wanted level fields. Five is the cap: the
 // pursuit has to feel hot, not turn the city into a parking lot.
@@ -16,7 +20,29 @@ const HELI_STARS = 3;
 const SPAWN_MIN_DIST = 45;
 const SPAWN_MAX_DIST = 95;
 const RESPAWN_DIST = 175;
-const SEE_RANGE = 55;
+// A unit sees Danny within this range with a clear line of sight. It
+// used to be 55 m, which made a cop blind on an open road the moment
+// Danny pulled 56 m ahead: the unit drove to the last-seen spot, sat
+// there, and the heat decayed while Danny was still in plain view down
+// a straight road (harness loop1). At 90 m, distance alone no longer
+// hides Danny on open roads — buildings do, through the line-of-sight
+// check — and the 7 s decay clock only runs when he is genuinely out
+// of sight.
+const SEE_RANGE = 90;
+// Foot officers: how many each wanted level fields (three is the cap, for
+// performance and for fairness), and how the foot chase plays. Officers
+// run a touch faster than Danny's 8 m/s sprint, so a straight sprint
+// alone never shakes them — break line of sight, punch one down, or get
+// in a car.
+const OFFICERS_PER_STAR = [0, 1, 2, 2, 3, 3];
+const OFFICER_RUN_SPEED = 8.4;
+const OFFICER_SPAWN_MIN = 12;
+const OFFICER_SPAWN_MAX = 30;
+const OFFICER_DESPAWN_DIST = 90;
+const OFFICER_ARREST_RANGE = 1.8;
+const OFFICER_ARREST_SECONDS = 1.2;
+const OFFICER_DOWN_SECONDS = 5;
+const OFFICER_SPAWN_INTERVAL = 1.0;
 const HIDDEN_DECAY_SECONDS = 7;
 const BUST_FOOT_SECONDS = 2.5;
 const BUST_CAR_SECONDS = 3.0;
@@ -24,6 +50,10 @@ const BUST_FOOT_RANGE = 6;
 const BUST_CAR_RANGE = 7;
 const RAM_DAMAGE_COOLDOWN = 1.2;
 const RAM_RANGE = 4.6; // just outside traffic's 4.5 m separation
+// A patrol car running Danny down on foot re-aims far slower than a
+// car-to-car ram: sharing the 1.2 s cooldown let one cop farm a sprinter
+// for 12 damage every 1.2 s (harness foot1: 228 damage in 30 s).
+const FOOT_RAM_COOLDOWN = 3.0;
 // A cop that has caught a slow player pulls up and holds instead of
 // driving through them: the arrest pose, and what lets the bust timer run.
 const HOLD_FOOT_RANGE = 6;
@@ -43,11 +73,20 @@ export class Police {
     this.rng = rng;
     this.game = game;
     this._units = []; // { car, hp, state, ramCooldown, heatCooldown, ... }
+    this._officers = []; // { figure, heading, state, walkPhase, ... }
     this._heli = null; // { group, rotor, cone, glow, angle }
     this._spawnTimer = 0;
+    this._officerTimer = 0;
     this._hiddenTimer = 0;
+    // The heat cannot decay before the pursuit has seen Danny at least
+    // once: without this, a unit spawning 90 m out — beyond the 55 m
+    // see range — let the hidden timer run from the first second, and a
+    // one-star chase evaporated in seven seconds before the cop ever
+    // closed in (harness loop1).
+    this._everSeen = false;
     this._bustedTimer = 0;
     this._bustWarned = false;
+    this._arrestWarned = false;
     this._flashTime = 0;
     this._time = 0;
   }
@@ -76,6 +115,27 @@ export class Police {
     return this._units;
   }
 
+  // The foot officers on the street — combat punches them, the minimap
+  // dots them. Empty while Danny is in a car.
+  get officers() {
+    return this._officers;
+  }
+
+  // Distance from Danny to the nearest chasing unit, or Infinity when
+  // none is out — the siren's volume follows this.
+  nearestUnitDistance() {
+    const target = this._playerTarget();
+    let best = Infinity;
+    for (const unit of this._units) {
+      if (unit.state !== 'chase') continue;
+      const d = Math.hypot(
+        unit.car.position.x - target.x, unit.car.position.z - target.z,
+      );
+      if (d < best) best = d;
+    }
+    return best;
+  }
+
   addHeat(stars) {
     if (stars <= 0) return;
     this.setWanted(this.game.wanted + stars);
@@ -86,10 +146,15 @@ export class Police {
     const rising = next > this.game.wanted;
     this.game.wanted = next;
     this._hiddenTimer = 0;
-    // Fresh heat brings a fresh unit at once, not after the spawn timer.
-    if (rising) this._spawnTimer = 0;
+    // Fresh heat brings a fresh unit at once, not after the spawn timer,
+    // and the decay clock waits until the new pursuit has made contact.
+    if (rising) {
+      this._spawnTimer = 0;
+      this._everSeen = false;
+    }
     if (next === 0) {
       this._removeAllUnits();
+      this._removeAllOfficers();
       this._removeHeli();
     }
   }
@@ -97,10 +162,14 @@ export class Police {
   clearPursuit() {
     this.game.wanted = 0;
     this._hiddenTimer = 0;
+    this._everSeen = false;
     this._spawnTimer = 0;
+    this._officerTimer = 0;
     this._bustedTimer = 0;
     this._bustWarned = false;
+    this._arrestWarned = false;
     this._removeAllUnits();
+    this._removeAllOfficers();
     this._removeHeli();
   }
 
@@ -122,6 +191,7 @@ export class Police {
     if (wanted <= 0) return;
 
     this._manageUnits(dt, wanted);
+    this._manageOfficers(dt, wanted);
     this._manageHeli(wanted);
 
     const player = this.game.player;
@@ -166,14 +236,18 @@ export class Police {
       this._units = this._units.filter((u) => !u._gone);
     }
     this._separateUnits();
+    this._updateOfficers(dt);
     this._updateHeli(dt, target);
 
     // Heat decay: stay unseen and the stars bleed off one at a time.
     // Being spotted loosens the hiding instead of erasing it outright,
     // so repeated short breaks from the pursuit add up to losing them.
+    // The clock only runs after first contact (see _everSeen): the heat
+    // cannot bleed off while the cops are still driving to the scene.
     if (seen) {
+      this._everSeen = true;
       this._hiddenTimer = Math.max(0, this._hiddenTimer - dt * 2);
-    } else {
+    } else if (this._everSeen) {
       this._hiddenTimer += dt;
       if (this._hiddenTimer >= HIDDEN_DECAY_SECONDS) {
         this._hiddenTimer = 0;
@@ -234,6 +308,7 @@ export class Police {
       hp: 100,
       state: 'chase',
       ramCooldown: 0,
+      footRamCooldown: 0,
       heatCooldown: 0,
       stuckTimer: 0,
       reverseTimer: 0,
@@ -251,15 +326,15 @@ export class Police {
     });
   }
 
-  _pickSpawnPoint(target) {
+  _pickSpawnPoint(target, minDist = SPAWN_MIN_DIST, maxDist = SPAWN_MAX_DIST) {
     for (let i = 0; i < 10; i++) {
       const p = this.world.randomRoadPoint(this.rng);
       const d = Math.hypot(p.x - target.x, p.z - target.z);
-      if (d >= SPAWN_MIN_DIST && d <= SPAWN_MAX_DIST) return p;
+      if (d >= minDist && d <= maxDist) return p;
     }
     // Fallback: the nearest road, a fixed hop away from Danny.
     const near = this.world.nearestRoadPoint(target.x, target.z);
-    return { x: near.x + SPAWN_MIN_DIST, z: near.z };
+    return { x: near.x + minDist, z: near.z };
   }
 
   _placeNearPlayer(car, target) {
@@ -281,6 +356,201 @@ export class Police {
       this.scene.remove(unit.car.group);
     }
     this._units = [];
+  }
+
+  // ----- foot officers -----
+
+  _manageOfficers(dt, wanted) {
+    // Officers chase on foot only: the moment Danny is in a car they
+    // are out of the hunt (the patrol cars take it from there).
+    if (this.game.playerCar || wanted <= 0) {
+      if (this._officers.length > 0) this._removeAllOfficers();
+      return;
+    }
+    const desired = OFFICERS_PER_STAR[wanted];
+    // Trim the farthest officers first when the heat drops.
+    while (this._officers.length > desired) {
+      const target = this.game.player.position;
+      let far = null;
+      let farD = -1;
+      for (const o of this._officers) {
+        const d = Math.hypot(
+          o.figure.group.position.x - target.x,
+          o.figure.group.position.z - target.z,
+        );
+        if (d > farD) {
+          farD = d;
+          far = o;
+        }
+      }
+      if (far) this._removeOfficer(far);
+      else break;
+    }
+    if (this._officers.length < desired) {
+      this._officerTimer -= dt;
+      if (this._officerTimer <= 0) {
+        this._officerTimer = OFFICER_SPAWN_INTERVAL;
+        this._spawnOfficer();
+      }
+    }
+  }
+
+  _spawnOfficer() {
+    const target = this.game.player.position;
+    const spot = this._pickSpawnPoint(target, OFFICER_SPAWN_MIN, OFFICER_SPAWN_MAX);
+    const figure = buildOfficerFigure(this.rng);
+    figure.group.position.set(spot.x, 0, spot.z);
+    const heading = Math.atan2(target.x - spot.x, target.z - spot.z);
+    figure.group.rotation.y = heading;
+    this.scene.add(figure.group);
+    this._officers.push({
+      figure,
+      heading,
+      state: 'chase', // 'chase' | 'down'
+      walkPhase: this.rng.range(0, Math.PI * 2),
+      arrestTimer: 0,
+      downTimer: 0,
+      lastSeenX: spot.x,
+      lastSeenZ: spot.z,
+      hasLastSeen: false,
+      _gone: false,
+    });
+  }
+
+  _removeOfficer(officer) {
+    officer._gone = true;
+    this.scene.remove(officer.figure.group);
+  }
+
+  _removeAllOfficers() {
+    for (const officer of this._officers) {
+      this.scene.remove(officer.figure.group);
+    }
+    this._officers = [];
+  }
+
+  // A punch puts an officer on the pavement for a few seconds. They get
+  // back up and resume the chase — punching a cop is a way out of a
+  // grab, not a way out of the heat.
+  knockDownOfficer(officer) {
+    if (officer.state === 'down') return;
+    officer.state = 'down';
+    officer.downTimer = OFFICER_DOWN_SECONDS;
+    officer.arrestTimer = 0;
+    officer.figure.group.rotation.x = -Math.PI / 2;
+    officer.figure.group.position.y = 0.35;
+    officer.figure.legL.rotation.x = 0;
+    officer.figure.legR.rotation.x = 0;
+    officer.figure.armL.rotation.x = 0;
+    officer.figure.armR.rotation.x = 0;
+  }
+
+  _updateOfficers(dt) {
+    const player = this.game.player;
+    if (this.game.playerCar) return; // managed out by _manageOfficers
+    let contact = false;
+    for (const officer of this._officers) {
+      const pos = officer.figure.group.position;
+      if (officer.state === 'down') {
+        officer.downTimer -= dt;
+        if (officer.downTimer <= 0) {
+          officer.state = 'chase';
+          officer.figure.group.rotation.x = 0;
+          pos.y = 0;
+        }
+        continue;
+      }
+      const dx = player.position.x - pos.x;
+      const dz = player.position.z - pos.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist > OFFICER_DESPAWN_DIST) {
+        // Left far behind: gone, and a fresh one spawns near Danny.
+        this._removeOfficer(officer);
+        continue;
+      }
+      // Like the patrol cars, an officer only homes in on Danny with a
+      // clear line of sight; otherwise they run to where they last saw
+      // him and wait there, so ducking behind a building still works.
+      const sees = dist < SEE_RANGE && this._hasLineOfSight(pos, player.position);
+      if (sees) {
+        officer.lastSeenX = player.position.x;
+        officer.lastSeenZ = player.position.z;
+        officer.hasLastSeen = true;
+      }
+      const aimX = sees || !officer.hasLastSeen ? player.position.x : officer.lastSeenX;
+      const aimZ = sees || !officer.hasLastSeen ? player.position.z : officer.lastSeenZ;
+      const aimDx = aimX - pos.x;
+      const aimDz = aimZ - pos.z;
+      const aimDist = Math.hypot(aimDx, aimDz);
+      if (!sees && aimDist < 4) {
+        // Lost the trail: stand at the last-seen spot and look around.
+        officer.figure.legL.rotation.x = 0;
+        officer.figure.legR.rotation.x = 0;
+        officer.figure.armL.rotation.x = 0;
+        officer.figure.armR.rotation.x = 0;
+        officer.arrestTimer = Math.max(0, officer.arrestTimer - dt * 2);
+        continue;
+      }
+      const wantHeading = Math.atan2(aimDx, aimDz);
+      officer.heading = angleLerp(officer.heading, wantHeading, 1 - Math.exp(-8 * dt));
+      pos.x += Math.sin(officer.heading) * OFFICER_RUN_SPEED * dt;
+      pos.z += Math.cos(officer.heading) * OFFICER_RUN_SPEED * dt;
+      this.world.resolveCircle(pos, 0.5);
+      officer.walkPhase += (OFFICER_RUN_SPEED * dt) / PLAYER.stepLength;
+      const s = Math.sin(officer.walkPhase * Math.PI * 2) * 0.7;
+      officer.figure.legL.rotation.x = s;
+      officer.figure.legR.rotation.x = -s;
+      officer.figure.armL.rotation.x = -s * 0.8;
+      officer.figure.armR.rotation.x = s * 0.8;
+      officer.figure.group.rotation.y = officer.heading;
+      // The grab: an officer on top of Danny for a second and a bit
+      // makes the arrest. Sprinting clear breaks the hold.
+      if (dist < OFFICER_ARREST_RANGE) {
+        contact = true;
+        officer.arrestTimer += dt;
+        if (!this._arrestWarned) {
+          this._arrestWarned = true;
+          this.game.hud.toast('An officer has you — break free or punch back!', 2600);
+        }
+        if (officer.arrestTimer >= OFFICER_ARREST_SECONDS) {
+          this.game.busted();
+          return;
+        }
+      } else {
+        officer.arrestTimer = Math.max(0, officer.arrestTimer - dt * 2);
+      }
+    }
+    // Officers removed mid-loop above leave holes; compact the list.
+    if (this._officers.some((o) => o._gone)) {
+      this._officers = this._officers.filter((o) => !o._gone);
+    }
+    if (!contact) this._arrestWarned = false;
+    this._separateOfficers();
+  }
+
+  _separateOfficers() {
+    // Officers give each other a little room instead of running as one.
+    const officers = this._officers;
+    for (let i = 0; i < officers.length; i++) {
+      if (officers[i].state === 'down') continue;
+      for (let j = i + 1; j < officers.length; j++) {
+        if (officers[j].state === 'down') continue;
+        const a = officers[i].figure.group.position;
+        const b = officers[j].figure.group.position;
+        const dx = b.x - a.x;
+        const dz = b.z - a.z;
+        const d = Math.hypot(dx, dz);
+        if (d > 0.01 && d < 1.1) {
+          const push = (1.1 - d) / 2;
+          const ux = dx / d;
+          const uz = dz / d;
+          a.x -= ux * push;
+          a.z -= uz * push;
+          b.x += ux * push;
+          b.z += uz * push;
+        }
+      }
+    }
   }
 
   // True when no building footprint crosses the ground-level line
@@ -334,6 +604,7 @@ export class Police {
     const player = this.game.player;
     const playerCar = this.game.playerCar;
     unit.ramCooldown = Math.max(0, unit.ramCooldown - dt);
+    unit.footRamCooldown = Math.max(0, unit.footRamCooldown - dt);
     unit.heatCooldown = Math.max(0, unit.heatCooldown - dt);
 
     if (unit.reverseTimer > 0) {
@@ -410,7 +681,17 @@ export class Police {
         unit.routeTimer = 0.8;
         unit.routeIndex = 0;
         const start = this.world.nearestRoadPoint(car.position.x, car.position.z);
-        const end = this.world.nearestRoadPoint(target.x, target.z);
+        // Lead a moving target: route at where Danny will be, not where
+        // he is, so the route turns the corner with him instead of
+        // chasing his tail-light around it a second late.
+        let ex = target.x;
+        let ez = target.z;
+        if (live && playerCar) {
+          const f = playerCar.forward();
+          ex += f.x * playerCar.speed * 1.2;
+          ez += f.z * playerCar.speed * 1.2;
+        }
+        const end = this.world.nearestRoadPoint(ex, ez);
         unit.route = [
           start,
           { x: end.x, z: start.z },
@@ -435,10 +716,29 @@ export class Police {
       }
     }
 
-    // Faster with more stars, plus a catch-up boost when far behind.
-    let cruise = 30 + wanted * 2.2;
-    if (dist > 60) cruise += 4;
-    car.driveToward(dt, aimX, aimZ, Math.min(cruise, 42), this.world);
+    // The cruise tracks Danny's own speed with a small margin, so the
+    // pursuit always closes — gently at one star, firmly at five. The
+    // old flat cruise (30 + 2.2/star) topped out below Danny's 38 m/s at
+    // one star, so a flat-out flee simply drove away and the heat
+    // decayed in seven seconds; the chase evaporated instead of chasing.
+    // A far unit gets a little extra to rejoin the hunt briskly.
+    const playerSpeed = playerCar ? Math.abs(playerCar.speed) : player.speed;
+    const margin = 1.0 + 0.6 * wanted;
+    let cruise = Math.max(30 + wanted * 2, playerSpeed + margin);
+    if (dist > 60) cruise += 2;
+    // Cornering: on the open road the cop takes route corners hot (no
+    // turn braking — route corners are intersections, so swinging wide
+    // stays on asphalt). Close in, the beeline cuts across blocks, so
+    // the cop still brakes for sharp turns — but only down to 15 m/s,
+    // not the usual 6: braking to a crawl at every one of Danny's turns
+    // cost ~70 m per corner and the chase never re-closed (harness
+    // loop1), while no braking at all blew the cop past Danny and into
+    // the buildings. The hold pose (slow player) and the ram do not use
+    // driveToward, so they keep their precision.
+    const cornerOpts = dist < 22
+      ? { turnBrakeFloor: 15 }
+      : { brakeForTurns: false };
+    car.driveToward(dt, aimX, aimZ, Math.min(cruise, 42), this.world, cornerOpts);
 
     // Stuck recovery: reverse out with alternating steering.
     const moved = Math.hypot(car.position.x - unit.lastX, car.position.z - unit.lastZ);
@@ -496,8 +796,8 @@ export class Police {
     const dz = player.position.z - car.position.z;
     const dist = Math.hypot(dx, dz);
     if (dist > 2.4 || dist < 0.01) return;
-    if (unit.ramCooldown <= 0 && Math.abs(car.speed) > 3) {
-      unit.ramCooldown = RAM_DAMAGE_COOLDOWN;
+    if (unit.footRamCooldown <= 0 && Math.abs(car.speed) > 3) {
+      unit.footRamCooldown = FOOT_RAM_COOLDOWN;
       this.game.damagePlayer(12);
       const ux = dx / dist;
       const uz = dz / dist;

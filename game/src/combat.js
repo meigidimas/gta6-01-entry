@@ -93,6 +93,32 @@ export class Combat {
       return;
     }
 
+    // Then foot officers: one good punch puts a cop on the pavement for
+    // a few seconds — the way out of an arrest grab — and it is a crime,
+    // so the stars go up.
+    if (game.police) {
+      let bestOfficer = null;
+      bestDist = Infinity;
+      for (const officer of game.police.officers) {
+        if (officer.state !== 'chase') continue;
+        const d = inFront(officer.figure.group.position);
+        if (d >= 0 && d < bestDist) {
+          bestDist = d;
+          bestOfficer = officer;
+        }
+      }
+      if (bestOfficer) {
+        game.police.knockDownOfficer(bestOfficer);
+        game.audio.blip(200, 0.09);
+        if (this.copHeatCooldown <= 0) {
+          this.copHeatCooldown = COP_HEAT_COOLDOWN;
+          game.police.addHeat(1);
+          game.hud.toast('You decked a cop! +1 star.', 3000);
+        }
+        return;
+      }
+    }
+
     // Then patrol cars: fists versus sheet metal, but enough of them and
     // the unit gives up the chase.
     if (game.police) {
