@@ -1,112 +1,106 @@
-// Neon Bay Heat — the mission framework and the opening mission.
-// A mission is a title, a reward and an ordered list of steps; each step
-// has a check that reads the live game context and a line of objective
-// text. The manager advances steps, pays rewards and tells the HUD what
-// to show. Later phases add missions by pushing more definitions here.
+// Neon Bay Heat — missions.
+// A mission is a list of steps; each step has its objective text, a check
+// against the live game context, and a map target for the marker and the
+// minimap. Mission 1, "First Wheels": steal any car, then drive it to the
+// marina drop-off for $250.
 
 import { MISSION_ONE } from './config.js';
+import { nearestParkedCar } from './vehicles.js';
 
-// ctx shape the checks read:
-// { inCar, stolenCar, playerX, playerZ, dropOff: {x, z} }
-function missionOneDefinition(dropOff) {
-  return {
+function dist2D(a, b) {
+  return Math.hypot(a.x - b.x, a.z - b.z);
+}
+
+export const MISSIONS = {
+  [MISSION_ONE.id]: {
     id: MISSION_ONE.id,
-    title: MISSION_ONE.title,
-    giver: MISSION_ONE.giver,
+    name: MISSION_ONE.name,
     reward: MISSION_ONE.reward,
-    intro: MISSION_ONE.intro,
     steps: [
       {
-        id: 'steal',
-        text: MISSION_ONE.steps[0].text,
-        objective: null, // no map marker yet: any car will do
-        check: (ctx) => ctx.inCar,
+        text: MISSION_ONE.stepSteal,
+        check(ctx) {
+          return ctx.player.inCar;
+        },
+        target(ctx) {
+          const car = nearestParkedCar(ctx.player.position, ctx.parked, 400);
+          return car ? { x: car.position.x, z: car.position.z } : null;
+        },
       },
       {
-        id: 'deliver',
-        text: MISSION_ONE.steps[1].text,
-        objective: { x: dropOff.x, z: dropOff.z },
-        check: (ctx) => {
-          if (!ctx.inCar) return false;
-          const dx = ctx.playerX - dropOff.x;
-          const dz = ctx.playerZ - dropOff.z;
-          return dx * dx + dz * dz < 36; // within 6 metres
+        text: MISSION_ONE.stepDrive,
+        check(ctx) {
+          return dist2D(ctx.player.position, ctx.world.marina) < MISSION_ONE.dropoffRadius;
+        },
+        target(ctx) {
+          return { x: ctx.world.marina.x, z: ctx.world.marina.z };
         },
       },
     ],
-  };
-}
+  },
+};
 
 export class MissionManager {
-  constructor(dropOff) {
-    this.missions = [missionOneDefinition(dropOff)];
-    this.index = 0; // current mission
-    this.step = 0; // current step inside it
-    this.completed = []; // ids of finished missions
-    this.started = false;
+  constructor() {
+    this.currentId = MISSION_ONE.id;
+    this.stepIndex = 0;
+    this.completed = [];
   }
 
   get current() {
-    return this.missions[this.index] || null;
+    return this.currentId ? MISSIONS[this.currentId] : null;
   }
 
   get currentStep() {
     const mission = this.current;
     if (!mission) return null;
-    return mission.steps[this.step] || null;
+    return mission.steps[this.stepIndex] || null;
   }
 
-  // The line the HUD shows, or a free-roam line when all is done.
   objectiveText() {
     const step = this.currentStep;
-    if (!step) return 'Free roam — Neon Bay is yours. More jobs coming soon.';
-    return `${this.current.title}: ${step.text}`;
+    if (step) return `${this.current.name}: ${step.text}`;
+    return 'Free roam — Neon Bay is yours.';
   }
 
-  // The world position the minimap and the 3D beam point at, if any.
-  objectivePosition() {
+  objectivePos(ctx) {
     const step = this.currentStep;
-    return step ? step.objective : null;
+    if (!step || !step.target) return null;
+    return step.target(ctx);
   }
 
-  start() {
-    this.started = true;
-  }
-
-  // Advance steps while their checks pass. Returns events for main:
-  // [{ type: 'step' | 'complete', mission, reward? }]
+  // Returns { type: 'step' } when a step completes, { type: 'mission',
+  // mission } when a mission completes, or null.
   update(ctx) {
-    if (!this.started) return [];
-    const events = [];
-    let guard = 0;
-    while (guard++ < 8) {
-      const mission = this.current;
-      if (!mission) break;
-      const step = this.currentStep;
-      if (!step) break;
-      if (!step.check(ctx)) break;
-      this.step += 1;
-      if (this.step >= mission.steps.length) {
-        this.completed.push(mission.id);
-        events.push({ type: 'complete', mission, reward: mission.reward });
-        this.index += 1;
-        this.step = 0;
-      } else {
-        events.push({ type: 'step', mission, step: this.currentStep });
-      }
+    const mission = this.current;
+    const step = this.currentStep;
+    if (!mission || !step) return null;
+    if (!step.check(ctx)) return null;
+    this.stepIndex++;
+    if (this.stepIndex >= mission.steps.length) {
+      this.completed.push(mission.id);
+      this.currentId = null;
+      this.stepIndex = 0;
+      return { type: 'mission', mission };
     }
-    return events;
+    return { type: 'step', mission, stepIndex: this.stepIndex };
   }
 
-  // Save / restore: only the indices and the completed list matter.
-  serialize() {
-    return { index: this.index, step: this.step, completed: [...this.completed] };
+  save() {
+    return {
+      currentId: this.currentId,
+      stepIndex: this.stepIndex,
+      completed: [...this.completed],
+    };
   }
 
-  restore(data) {
+  load(data) {
     if (!data) return;
-    this.index = data.index || 0;
-    this.step = data.step || 0;
-    this.completed = Array.isArray(data.completed) ? [...data.completed] : [];
+    if (data.currentId && MISSIONS[data.currentId]) this.currentId = data.currentId;
+    else if (data.currentId === null) this.currentId = null;
+    if (typeof data.stepIndex === 'number') this.stepIndex = data.stepIndex;
+    if (Array.isArray(data.completed)) {
+      this.completed = data.completed.filter((id) => MISSIONS[id]);
+    }
   }
 }

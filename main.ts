@@ -1,14 +1,15 @@
-// Neon Bay Heat — a working gta6-01 entry (Node 22, standard library only).
-// The game is this directory's game/ folder: plain static files a desktop
-// browser loads offline (game/index.html and its ES modules, three.js
-// vendored as a minified build under game/vendor/, zero network requests).
-// Danny Cole, a wheelman pulled into the underworld of Neon Bay, explores
-// a procedural 3D grid city on foot and by car: arcade driving, traffic,
-// car stealing, a wanted level, a HUD with a minimap, missions with a
-// story, synthesised WebAudio sound, and a save in localStorage. This
-// program hands it in: it copies game/ and screenshots/ from beside this
-// file to /output and writes /output/dossier.json, the summary the judge
-// reads, with the vendored make.fun library.
+// Neon Bay Heat — a sun-soaked open-world crime game for make.fun's gta6-01
+// bounty ("Make GTA 6"). Danny Cole, a wheelman pulled into Neon Bay's
+// underworld, explores a procedural 3D coastal city on foot and by car:
+// arcade driving, traffic, a wanted level, missions with a story, a HUD
+// with a live minimap, synthesized sound, and localStorage saves.
+//
+// This program is the entrypoint: it hands the game in. It copies game/
+// and screenshots/ from beside this file to /output and writes
+// /output/dossier.json, the summary the judge reads, with the vendored
+// make.fun library. The game itself is plain static files under game/ —
+// game/index.html opens in desktop Chrome and plays offline, with no
+// network request and no build step.
 //
 // Serve it locally with `node serve.ts`, then open http://localhost:8080.
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
@@ -31,13 +32,25 @@ if (existsSync(join(here, 'screenshots'))) cpSync(join(here, 'screenshots'), joi
 // scorer would refuse (more than 4 screenshots or one over 256 KiB; more than 993 files in game/ or 48 MiB of game
 // files, in all, or a path under game/ over 1000 bytes: game/ counts beside /output's own 1000-entry cap, its
 // screenshots/ and dossier.json).
-const dossier = buildDossier(out, {
-  text_max_bytes: 163840,
-  screenshots: { max: 4, max_bytes: 262144 },
-  game_max_files: 993,
-  game_max_bytes: 50331648,
-  game_path_max_bytes: 1000,
-});
-writeFileSync(join(out, 'dossier.json'), dossier);
-// One line on stdout so a run's result is visible without opening the file.
-console.log(`Neon Bay Heat handed in to ${out} (dossier.json, ${Buffer.byteLength(dossier)} bytes).`);
+const dossierPath = join(out, 'dossier.json');
+writeFileSync(
+  dossierPath,
+  buildDossier(out, {
+    text_max_bytes: 163840,
+    screenshots: { max: 4, max_bytes: 262144 },
+    game_max_files: 993,
+    game_max_bytes: 50331648,
+    game_path_max_bytes: 1000,
+  }),
+);
+
+// A short build summary on stdout, so a local run shows what was handed in
+// without opening the output directory. Deterministic runs print the same
+// lines: only the output path and the dossier size vary.
+const { statSync, readdirSync } = await import('node:fs');
+const shotNames = existsSync(join(out, 'screenshots'))
+  ? readdirSync(join(out, 'screenshots')).filter((name) => !name.startsWith('.')).sort()
+  : [];
+console.log(`Neon Bay Heat handed in to ${out}`);
+console.log(`dossier.json: ${statSync(dossierPath).size} bytes`);
+console.log(`screenshots: ${shotNames.length > 0 ? shotNames.join(', ') : 'none'}`);

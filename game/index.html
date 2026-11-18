@@ -1,132 +1,120 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Neon Bay Heat — an open-world crime game</title>
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b1620;
-    font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; color: #fff; }
-  #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
-  .hidden { display: none !important; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0b0e13; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #f2f2f2; }
+  #game-canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
 
-  /* ---- HUD ---- */
-  #hud { position: fixed; inset: 0; pointer-events: none; z-index: 5; }
-  .panel { background: rgba(8, 14, 20, 0.62); border: 1px solid rgba(255, 255, 255, 0.16);
-    border-radius: 10px; padding: 8px 12px; text-shadow: 0 1px 2px rgba(0,0,0,0.8); }
-  #top-right { position: absolute; top: 14px; right: 16px; text-align: right; }
-  #wanted-stars { font-size: 26px; letter-spacing: 4px; color: #ffd23f;
-    text-shadow: 0 0 10px rgba(255, 210, 63, 0.6), 0 1px 2px rgba(0,0,0,0.9); }
-  #wanted-stars.hot { color: #ff5a3c; text-shadow: 0 0 12px rgba(255, 90, 60, 0.8); }
-  #cash { font-size: 24px; font-weight: 800; color: #7ee787; margin-top: 2px; }
-  #objective-box { position: absolute; top: 14px; left: 16px; max-width: 380px; }
-  #objective-label { font-size: 11px; font-weight: 800; letter-spacing: 2px; color: #ffd23f; }
-  #objective-text { font-size: 15px; line-height: 1.35; margin-top: 2px; }
-  #minimap { position: absolute; left: 16px; bottom: 16px; width: 180px; height: 180px;
-    border: 2px solid rgba(255,255,255,0.35); border-radius: 50%; background: #1d2733;
-    box-shadow: 0 4px 18px rgba(0,0,0,0.5); }
-  #speed-box { position: absolute; right: 16px; bottom: 16px; text-align: right; }
-  #speed { font-size: 44px; font-weight: 900; line-height: 1; font-variant-numeric: tabular-nums; }
-  #speed-unit { font-size: 12px; letter-spacing: 2px; color: #cfe3ee; }
-  #health-box { position: absolute; right: 16px; bottom: 96px; width: 170px; }
-  #health-label { font-size: 11px; font-weight: 800; letter-spacing: 2px; color: #ffd23f; margin-bottom: 4px; }
-  #health-bar { height: 10px; background: rgba(255,255,255,0.18); border-radius: 5px; overflow: hidden; }
-  #health-fill { height: 100%; width: 100%; background: #37d67a; border-radius: 5px; }
-  #health-fill.low { background: #ff5a3c; }
-  #hint { position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%);
-    font-size: 14px; padding: 7px 14px; white-space: nowrap; }
-  #toast { position: absolute; left: 50%; top: 84px; transform: translateX(-50%) translateY(-8px);
-    font-size: 17px; font-weight: 700; padding: 10px 18px; opacity: 0;
-    transition: opacity 0.25s, transform 0.25s; max-width: 640px; text-align: center; }
-  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  /* ---------- HUD ---------- */
+  #hud { position: fixed; inset: 0; pointer-events: none; display: none; }
+  #hud.visible { display: block; }
+  .hud-panel { position: absolute; background: rgba(8, 12, 18, 0.55); border-radius: 10px; padding: 10px 14px; backdrop-filter: blur(2px); }
+  #top-left { top: 14px; left: 14px; }
+  #wanted { font-size: 26px; letter-spacing: 4px; color: #ffd23f; text-shadow: 0 2px 6px rgba(0,0,0,0.7); }
+  #wanted.hot { color: #ff5a4e; }
+  #cash { font-size: 22px; font-weight: 700; color: #7be495; text-shadow: 0 2px 6px rgba(0,0,0,0.7); margin-top: 2px; }
+  #top-right { top: 14px; right: 14px; text-align: right; }
+  #speed { font-size: 26px; font-weight: 800; text-shadow: 0 2px 6px rgba(0,0,0,0.7); }
+  #health-bar { width: 170px; height: 10px; background: rgba(255,255,255,0.25); border-radius: 5px; margin-top: 6px; overflow: hidden; }
+  #health-fill { height: 100%; width: 100%; background: #7be495; border-radius: 5px; transition: width 0.25s; }
+  #health-text { font-size: 12px; opacity: 0.85; margin-top: 3px; }
+  #minimap-wrap { position: absolute; left: 14px; bottom: 14px; border: 2px solid rgba(255,255,255,0.55); border-radius: 50%; overflow: hidden; width: 184px; height: 184px; box-shadow: 0 4px 18px rgba(0,0,0,0.5); }
+  #minimap { width: 180px; height: 180px; display: block; }
+  #objective-box { position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); max-width: 620px; text-align: center; background: rgba(8, 12, 18, 0.6); border-radius: 10px; padding: 10px 18px; }
+  #objective { font-size: 16px; font-weight: 600; }
+  #hint { font-size: 13px; color: #ffd23f; margin-top: 3px; min-height: 16px; }
+  #toasts { position: absolute; top: 96px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .toast { background: rgba(8, 12, 18, 0.78); border: 1px solid rgba(255, 210, 63, 0.6); border-radius: 8px; padding: 9px 16px; font-size: 15px; font-weight: 600; transition: opacity 0.6s; }
+  .toast.fade { opacity: 0; }
+  #mute-btn { position: absolute; right: 14px; bottom: 14px; pointer-events: auto; background: rgba(8,12,18,0.55); color: #f2f2f2; border: 1px solid rgba(255,255,255,0.35); border-radius: 8px; padding: 8px 12px; font-size: 14px; cursor: pointer; }
 
-  /* ---- Screens ---- */
-  .screen { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column;
-    align-items: center; justify-content: center; text-align: center; padding: 24px; }
-  #title-screen { background: linear-gradient(180deg, rgba(6,12,20,0.72) 0%, rgba(6,12,20,0.45) 45%, rgba(6,12,20,0.78) 100%); }
-  #title-screen h1 { margin: 0; font-size: 64px; font-weight: 900; letter-spacing: 4px; line-height: 1;
-    background: linear-gradient(180deg, #fff6c8 20%, #ffd23f 55%, #ff7a3c 100%);
+  /* ---------- Full screens ---------- */
+  .screen { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; text-align: center; background: rgba(5, 8, 14, 0.62); z-index: 10; }
+  .screen.visible { display: flex; }
+  .logo { font-size: 64px; font-weight: 900; letter-spacing: 2px; line-height: 1;
+    background: linear-gradient(180deg, #ffd23f 20%, #ff7a3d 60%, #e83e8c 100%);
     -webkit-background-clip: text; background-clip: text; color: transparent;
-    filter: drop-shadow(0 4px 14px rgba(0,0,0,0.7)); }
-  #title-screen .tagline { margin: 12px 0 4px; font-size: 19px; color: #e8f2f8; font-weight: 600; }
-  #title-screen .story { max-width: 560px; font-size: 15px; line-height: 1.5; color: #cfe0ea; margin: 10px 0 18px; }
-  .btn { pointer-events: auto; cursor: pointer; border: none; border-radius: 10px;
-    background: linear-gradient(180deg, #ffd23f, #ff9a3c); color: #1a1206;
-    font-size: 20px; font-weight: 900; letter-spacing: 2px; padding: 14px 42px;
-    box-shadow: 0 6px 22px rgba(255, 154, 60, 0.45); }
-  .btn:hover { filter: brightness(1.08); }
-  .btn.secondary { background: rgba(255,255,255,0.14); color: #fff; font-size: 15px;
-    padding: 10px 26px; box-shadow: none; border: 1px solid rgba(255,255,255,0.3); margin-top: 12px; }
-  .controls { margin-top: 22px; font-size: 13px; line-height: 1.9; color: #b9ccd8; }
+    text-shadow: 0 0 42px rgba(255, 122, 61, 0.35); }
+  .tagline { font-size: 19px; color: #dfe8f2; margin-top: 10px; }
+  .story { max-width: 560px; font-size: 15px; line-height: 1.55; color: #c3ccd8; margin-top: 18px; }
+  .controls { margin-top: 20px; font-size: 14px; color: #aeb9c6; line-height: 1.9; }
   .controls b { color: #fff; }
-  #save-note { margin-top: 14px; font-size: 13px; color: #7ee787; min-height: 18px; }
-  #pause-screen, #gameover-screen { background: rgba(6, 12, 20, 0.72); }
-  #pause-screen h2, #gameover-screen h2 { margin: 0 0 8px; font-size: 52px; font-weight: 900; letter-spacing: 6px; }
-  #gameover-screen h2 { color: #ff5a3c; }
-  #gameover-reason { max-width: 520px; font-size: 16px; line-height: 1.5; color: #e8f2f8; margin-bottom: 20px; }
-  #webgl-error { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 20;
-    max-width: 520px; background: #2a1414; border: 1px solid #ff5a3c; border-radius: 10px;
-    padding: 18px 22px; font-size: 15px; line-height: 1.5; }
+  .btn-row { display: flex; gap: 12px; margin-top: 26px; }
+  button.menu { pointer-events: auto; font-size: 18px; font-weight: 700; padding: 13px 34px; border-radius: 10px; border: none; cursor: pointer; background: linear-gradient(180deg, #ffd23f, #ff7a3d); color: #1c1005; box-shadow: 0 6px 22px rgba(255, 122, 61, 0.45); }
+  button.menu:hover { filter: brightness(1.08); }
+  button.menu.secondary { background: rgba(255,255,255,0.12); color: #f2f2f2; border: 1px solid rgba(255,255,255,0.35); box-shadow: none; }
+  .wasted { font-size: 84px; font-weight: 900; letter-spacing: 10px; color: #e8e8e8; text-shadow: 0 0 40px rgba(255,255,255,0.35); }
+  .sub { font-size: 17px; color: #c3ccd8; margin-top: 12px; }
+  .foot { position: absolute; bottom: 18px; font-size: 12px; color: #8a94a3; }
 </style>
 <script type="importmap">
-{ "imports": { "three": "./vendor/three.module.min.js" } }
+{
+  "imports": {
+    "three": "./vendor/three.module.min.js"
+  }
+}
 </script>
 </head>
 <body>
-<canvas id="game" aria-label="Neon Bay Heat: explore Neon Bay on foot and by car"></canvas>
+<canvas id="game-canvas"></canvas>
 
-<div id="hud" class="hidden">
-  <div id="objective-box" class="panel">
-    <div id="objective-label">CURRENT JOB</div>
-    <div id="objective-text">Steal a car.</div>
-  </div>
-  <div id="top-right" class="panel">
-    <div id="wanted-stars">☆☆☆☆☆</div>
+<div id="hud">
+  <div class="hud-panel" id="top-left">
+    <div id="wanted">☆☆☆☆☆</div>
     <div id="cash">$0</div>
   </div>
-  <canvas id="minimap" width="180" height="180" aria-label="Minimap of Neon Bay"></canvas>
-  <div id="health-box" class="panel">
-    <div id="health-label">CAR HEALTH</div>
+  <div class="hud-panel" id="top-right">
+    <div id="speed"></div>
     <div id="health-bar"><div id="health-fill"></div></div>
+    <div id="health-text">100</div>
   </div>
-  <div id="speed-box" class="panel">
-    <div id="speed">0</div>
-    <div id="speed-unit">KM/H</div>
+  <div id="minimap-wrap"><canvas id="minimap" width="180" height="180"></canvas></div>
+  <div id="objective-box">
+    <div id="objective"></div>
+    <div id="hint"></div>
   </div>
-  <div id="hint" class="panel"></div>
-  <div id="toast" class="panel"></div>
+  <div id="toasts"></div>
+  <button id="mute-btn" type="button">Sound: on/off (M)</button>
 </div>
 
-<div id="title-screen" class="screen">
-  <h1>NEON BAY<br>HEAT</h1>
-  <div class="tagline">A wheelman. A sunny city. One bad decision.</div>
-  <div class="story">Danny Cole came to Neon Bay to drive getaway cars and keep his head
-    down. The city had other plans. Explore the coast on foot or behind the wheel,
-    steal what you need, and stay ahead of the heat.</div>
-  <button id="start-btn" class="btn">START ENGINE</button>
-  <div id="save-note"></div>
+<div class="screen visible" id="title-screen">
+  <div class="logo">NEON BAY HEAT</div>
+  <div class="tagline">A sun-soaked open-world crime game</div>
+  <p class="story">Danny Cole came to Neon Bay to drive getaway cars and keep his head
+  down. The city had other plans. Explore the coast on foot or behind the wheel,
+  steal what you need, lose the heat, and take the jobs nobody else will.</p>
   <div class="controls">
-    <b>WASD / arrows</b> move &amp; drive &nbsp;·&nbsp; <b>Shift</b> run &nbsp;·&nbsp;
-    <b>Mouse drag</b> look around &nbsp;·&nbsp; <b>E</b> steal / leave car<br>
-    <b>Esc / P</b> pause &nbsp;·&nbsp; <b>M</b> mute &nbsp;·&nbsp; progress saves automatically
+    <b>W A S D</b> move / drive &nbsp;·&nbsp; <b>Shift</b> run &nbsp;·&nbsp; <b>E</b> steal / exit car<br>
+    <b>Mouse drag</b> look around &nbsp;·&nbsp; <b>Esc / P</b> pause &nbsp;·&nbsp; <b>M</b> mute
+  </div>
+  <div class="btn-row">
+    <button class="menu" id="play-btn" type="button">Start Engine</button>
+    <button class="menu secondary" id="newgame-btn" type="button">New Game</button>
+  </div>
+  <div class="foot">Progress saves automatically · An original game — no part of any commercial game</div>
+</div>
+
+<div class="screen" id="pause-screen">
+  <div class="logo" style="font-size: 44px;">PAUSED</div>
+  <div class="sub">Neon Bay waits for no one. Well — except now.</div>
+  <div class="btn-row">
+    <button class="menu" id="resume-btn" type="button">Resume</button>
+    <button class="menu secondary" id="quit-btn" type="button">Main Menu</button>
   </div>
 </div>
 
-<div id="pause-screen" class="screen hidden">
-  <h2>PAUSED</h2>
-  <div class="story" style="max-width:520px;color:#cfe0ea;margin-bottom:20px;">Neon Bay waits for no one — except right now.</div>
-  <button id="resume-btn" class="btn">RESUME</button>
-  <button id="restart-btn" class="btn secondary">RESTART RUN</button>
-  <button id="mute-btn" class="btn secondary">SOUND: ON</button>
+<div class="screen" id="gameover-screen">
+  <div class="wasted">WASTED</div>
+  <div class="sub">Danny's run ends here — for now. Neon Bay never forgets a wheelman.</div>
+  <div class="btn-row">
+    <button class="menu" id="restart-btn" type="button">Back on the Streets</button>
+  </div>
 </div>
-
-<div id="gameover-screen" class="screen hidden">
-  <h2>WASTED</h2>
-  <div id="gameover-reason"></div>
-  <button id="retry-btn" class="btn">BACK ON YOUR FEET</button>
-</div>
-
-<div id="webgl-error" class="hidden"></div>
 
 <script type="module" src="./src/main.js"></script>
 </body>

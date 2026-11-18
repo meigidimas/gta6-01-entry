@@ -1,46 +1,144 @@
-// Neon Bay Heat — synthesised sound with the Web Audio API only.
-// No audio files: the engine is a filtered sawtooth, the UI is short
-// sine blips, and the music is a slow chord loop of detuned triangles.
-// Nothing starts until a user gesture (the browser's rule), and every
-// sound survives a missing AudioContext by quietly doing nothing.
+// Neon Bay Heat — synthesized sound, no audio files.
+// Everything is built from WebAudio oscillators: a sawtooth engine hum, UI
+// blips, a success jingle and a slow chord-loop soundtrack. The context is
+// created only after a real user gesture, as browsers require.
 
 import { AUDIO } from './config.js';
+
+const CHORDS = [
+  [220.0, 261.63, 329.63], // A minor
+  [174.61, 220.0, 261.63], // F major
+  [196.0, 246.94, 293.66], // G major
+  [164.81, 220.0, 261.63], // E minor
+];
 
 export class AudioEngine {
   constructor() {
     this.ctx = null;
     this.master = null;
     this.engineOsc = null;
-    this.engineOsc2 = null;
-    this.engineFilter = null;
     this.engineGain = null;
+    this.engineFilter = null;
+    this.musicGain = null;
     this.musicTimer = null;
-    this.musicChord = 0;
+    this.nextChordAt = 0;
+    this.chordIndex = 0;
     this.muted = false;
-    this.engineOn = false;
   }
 
-  // Create the context on a click or keypress; safe to call repeatedly.
-  // Without a real gesture the browser would suspend it at once (and
-  // log a warning), so staged screenshot runs simply stay silent.
-  unlock() {
+  ensure() {
+    // Call from a click or key press. Safe to call repeatedly.
     if (this.ctx) {
-      if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
+      if (this.ctx.state === 'suspended') this.ctx.resume();
       return;
     }
-    if (typeof navigator !== 'undefined' && navigator.userActivation
-      && !navigator.userActivation.hasBeenActive) return;
-    try {
-      const Ctor = window.AudioContext || window.webkitAudioContext;
-      if (!Ctor) return;
-      this.ctx = new Ctor();
-      this.master = this.ctx.createGain();
-      this.master.gain.value = this.muted ? 0 : AUDIO.masterVolume;
-      this.master.connect(this.ctx.destination);
-      this.startEngineLoop();
-      this.startMusic();
-    } catch {
-      this.ctx = null;
+    const Ctor = window.AudioContext || window.webkitAudioContext;
+    if (!Ctor) return;
+    this.ctx = new Ctor();
+    this.master = this.ctx.createGain();
+    this.master.gain.value = this.muted ? 0 : AUDIO.masterVolume;
+    this.master.connect(this.ctx.destination);
+
+    // Engine: one sawtooth through a low-pass, gain driven by speed.
+    this.engineOsc = this.ctx.createOscillator();
+    this.engineOsc.type = 'sawtooth';
+    this.engineOsc.frequency.value = 55;
+    this.engineFilter = this.ctx.createBiquadFilter();
+    this.engineFilter.type = 'lowpass';
+    this.engineFilter.frequency.value = 420;
+    this.engineGain = this.ctx.createGain();
+    this.engineGain.gain.value = 0;
+    this.engineOsc.connect(this.engineFilter);
+    this.engineFilter.connect(this.engineGain);
+    this.engineGain.connect(this.master);
+    this.engineOsc.start();
+
+    this.musicGain = this.ctx.createGain();
+    this.musicGain.gain.value = AUDIO.musicVolume;
+    this.musicGain.connect(this.master);
+  }
+
+  setEngine(speedNorm, driving) {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    const freq = 52 + Math.min(1, speedNorm) * 130;
+    this.engineOsc.frequency.setTargetAtTime(freq, t, 0.08);
+    this.engineFilter.frequency.setTargetAtTime(320 + Math.min(1, speedNorm) * 900, t, 0.1);
+    const target = driving ? AUDIO.engineVolume * (0.45 + 0.55 * Math.min(1, speedNorm)) : 0;
+    this.engineGain.gain.setTargetAtTime(target, t, 0.12);
+  }
+
+  blip(freq = 880, dur = 0.09) {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    osc.type = 'square';
+    osc.frequency.value = freq;
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(AUDIO.blipVolume, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    osc.connect(gain);
+    gain.connect(this.master);
+    osc.start(t);
+    osc.stop(t + dur + 0.02);
+  }
+
+  success() {
+    if (!this.ctx) return;
+    const notes = [523.25, 659.25, 783.99, 1046.5];
+    const t0 = this.ctx.currentTime;
+    notes.forEach((freq, i) => {
+      const t = t0 + i * 0.11;
+      const osc = this.ctx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.value = freq;
+      const gain = this.ctx.createGain();
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.exponentialRampToValueAtTime(0.28, t + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+      osc.connect(gain);
+      gain.connect(this.master);
+      osc.start(t);
+      osc.stop(t + 0.45);
+    });
+  }
+
+  startMusic() {
+    if (!this.ctx || this.musicTimer) return;
+    this.nextChordAt = this.ctx.currentTime + 0.1;
+    this.chordIndex = 0;
+    const barSeconds = (60 / AUDIO.musicTempo) * 4;
+    this.musicTimer = window.setInterval(() => {
+      if (!this.ctx) return;
+      while (this.nextChordAt < this.ctx.currentTime + 0.6) {
+        this._playChord(CHORDS[this.chordIndex % CHORDS.length], this.nextChordAt, barSeconds);
+        this.chordIndex++;
+        this.nextChordAt += barSeconds;
+      }
+    }, 200);
+  }
+
+  _playChord(freqs, startAt, dur) {
+    for (const freq of freqs) {
+      const osc = this.ctx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.value = freq;
+      const gain = this.ctx.createGain();
+      gain.gain.setValueAtTime(0.0001, startAt);
+      gain.gain.linearRampToValueAtTime(0.5, startAt + 0.4);
+      gain.gain.setValueAtTime(0.5, startAt + dur - 0.5);
+      gain.gain.linearRampToValueAtTime(0.0001, startAt + dur);
+      osc.connect(gain);
+      gain.connect(this.musicGain);
+      osc.start(startAt);
+      osc.stop(startAt + dur + 0.05);
+    }
+  }
+
+  stopMusic() {
+    if (this.musicTimer) {
+      window.clearInterval(this.musicTimer);
+      this.musicTimer = null;
     }
   }
 
@@ -48,116 +146,6 @@ export class AudioEngine {
     this.muted = muted;
     if (this.master && this.ctx) {
       this.master.gain.setTargetAtTime(muted ? 0 : AUDIO.masterVolume, this.ctx.currentTime, 0.05);
-    }
-  }
-
-  // The engine: two detuned saws through a lowpass, pitch follows speed.
-  startEngineLoop() {
-    const ctx = this.ctx;
-    this.engineFilter = ctx.createBiquadFilter();
-    this.engineFilter.type = 'lowpass';
-    this.engineFilter.frequency.value = 420;
-    this.engineGain = ctx.createGain();
-    this.engineGain.gain.value = 0;
-    this.engineOsc = ctx.createOscillator();
-    this.engineOsc.type = 'sawtooth';
-    this.engineOsc.frequency.value = 55;
-    this.engineOsc2 = ctx.createOscillator();
-    this.engineOsc2.type = 'sawtooth';
-    this.engineOsc2.frequency.value = 55 * 1.007;
-    this.engineOsc.connect(this.engineFilter);
-    this.engineOsc2.connect(this.engineFilter);
-    this.engineFilter.connect(this.engineGain);
-    this.engineGain.connect(this.master);
-    this.engineOsc.start();
-    this.engineOsc2.start();
-    this.engineOn = true;
-  }
-
-  // speedNorm in [0, 1]; inCar false silences the engine.
-  setEngine(speedNorm, inCar) {
-    if (!this.engineOn || !this.ctx) return;
-    const t = this.ctx.currentTime;
-    const rpm = 50 + speedNorm * 165;
-    this.engineOsc.frequency.setTargetAtTime(rpm, t, 0.08);
-    this.engineOsc2.frequency.setTargetAtTime(rpm * 1.007, t, 0.08);
-    this.engineFilter.frequency.setTargetAtTime(320 + speedNorm * 1400, t, 0.1);
-    const target = inCar ? AUDIO.engineVolume * (0.45 + 0.55 * speedNorm) : 0;
-    this.engineGain.gain.setTargetAtTime(target, t, 0.12);
-  }
-
-  // One short sine blip; pitch picks the mood (UI, pickup, error).
-  blip(freq = 660, seconds = 0.09, volume = 0.22) {
-    if (!this.ctx) return;
-    const t = this.ctx.currentTime;
-    const osc = this.ctx.createOscillator();
-    const gain = this.ctx.createGain();
-    osc.type = 'sine';
-    osc.frequency.value = freq;
-    gain.gain.setValueAtTime(volume, t);
-    gain.gain.exponentialRampToValueAtTime(0.001, t + seconds);
-    osc.connect(gain);
-    gain.connect(this.master);
-    osc.start(t);
-    osc.stop(t + seconds + 0.02);
-  }
-
-  // A rising three-note jingle for a completed mission step.
-  success() {
-    if (!this.ctx) return;
-    [523.25, 659.25, 783.99].forEach((freq, i) => {
-      window.setTimeout(() => this.blip(freq, 0.22, 0.25), i * 110);
-    });
-  }
-
-  // A low two-note sting for a crash or a failed objective.
-  thud() {
-    if (!this.ctx) return;
-    this.blip(110, 0.22, 0.35);
-    window.setTimeout(() => this.blip(82, 0.3, 0.3), 90);
-  }
-
-  // The music loop: one chord per bar, soft triangle pads, plus a
-  // sparse plucked melody note on some beats. Pure oscillators.
-  startMusic() {
-    if (this.musicTimer !== null) return;
-    const beatMs = (60 / AUDIO.musicBpm) * 1000;
-    let beat = 0;
-    const playChord = (freqs) => {
-      if (!this.ctx) return;
-      const t = this.ctx.currentTime;
-      freqs.forEach((freq) => {
-        const osc = this.ctx.createOscillator();
-        const gain = this.ctx.createGain();
-        osc.type = 'triangle';
-        osc.frequency.value = freq;
-        gain.gain.setValueAtTime(0, t);
-        gain.gain.linearRampToValueAtTime(AUDIO.musicVolume / freqs.length, t + 0.4);
-        gain.gain.setValueAtTime(AUDIO.musicVolume / freqs.length, t + beatMs * 3.6 / 1000);
-        gain.gain.linearRampToValueAtTime(0, t + beatMs * 4 / 1000);
-        osc.connect(gain);
-        gain.connect(this.master);
-        osc.start(t);
-        osc.stop(t + beatMs * 4 / 1000 + 0.05);
-      });
-    };
-    const melody = [440, 0, 523.25, 0, 659.25, 0, 587.33, 0];
-    this.musicTimer = window.setInterval(() => {
-      if (!this.ctx) return;
-      if (beat % 4 === 0) {
-        playChord(AUDIO.musicChords[this.musicChord % AUDIO.musicChords.length]);
-        this.musicChord += 1;
-      }
-      const note = melody[beat % melody.length];
-      if (note) this.blip(note, 0.3, 0.06);
-      beat += 1;
-    }, beatMs);
-  }
-
-  stopMusic() {
-    if (this.musicTimer !== null) {
-      window.clearInterval(this.musicTimer);
-      this.musicTimer = null;
     }
   }
 }
